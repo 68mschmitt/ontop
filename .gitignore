@@ -1,0 +1,25 @@
+# Build outputs
+/ontop
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Dependency and workspace files
+/vendor/
+go.work
+go.work.sum
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
