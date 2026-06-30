@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -25,6 +28,10 @@ import (
 
 const defaultInterval = time.Second
 
+// Global CLI config for collectors that need it.
+var studioPort = 8888
+var studioToken = ""
+
 type optFloat struct {
 	Value float64
 	OK    bool
@@ -37,6 +44,7 @@ type snapshot struct {
 	GPUs             []gpuStats
 	OllamaProcesses  []ollamaProcess
 	OllamaPS         commandOutput
+	UnslothStudio    unslothStudioStats
 	Warnings         []string
 	CollectionMillis int64
 }
@@ -91,6 +99,31 @@ type commandOutput struct {
 	Output  string
 	Error   string
 	Missing bool
+}
+
+type unslothStudioStats struct {
+	Connected           bool
+	ActiveModel         string
+	ModelIdentifier     string
+	GGUFVariant         string
+	IsVision            bool
+	IsAudio             bool
+	SupportsReasoning   bool
+	LoadedModels        []string
+	LoadingModels       []string
+	ContextLength       int
+	MaxContextLength    int
+	NativeContextLength int
+	SpeculativeType     string
+	TensorParallel      bool
+	TrainStatus         string
+	TrainStep           int
+	TrainLoss           float64
+	TrainLr             float64
+	LoadPhase           string
+	LoadBytes           int64
+	LoadTotal           int64
+	Error               string
 }
 
 type tickMsg time.Time
@@ -156,7 +189,14 @@ var (
 
 func main() {
 	interval := flag.Duration("interval", defaultInterval, "refresh interval such as 500ms, 1s, or 2s")
+	flag.IntVar(&studioPort, "unsloth-port", 8888, "Unsloth Studio API port")
+	flag.StringVar(&studioToken, "unsloth-token", "", "Unsloth Studio API Bearer token (or set UNSLOTH_STUDIO_TOKEN)")
 	flag.Parse()
+
+	// Support env var as fallback for token.
+	if studioToken == "" {
+		studioToken = os.Getenv("UNSLOTH_STUDIO_TOKEN")
+	}
 
 	if *interval <= 0 {
 		fmt.Fprintln(os.Stderr, "interval must be greater than zero")
@@ -275,6 +315,7 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
+	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
 	s.CollectionMillis = time.Since(started).Milliseconds()
 
 	return s
@@ -499,6 +540,177 @@ func collectOllamaPS(ctx context.Context) commandOutput {
 	return commandOutput{Output: strings.TrimSpace(stdout)}
 }
 
+func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudioStats {
+	base := fmt.Sprintf("http://127.0.0.1:%d", studioPort)
+
+	// Health check (unauthenticated).
+	healthURL := base + "/api/health"
+	resp, err := studioHTTPGet(ctx, healthURL, "")
+	if err != nil {
+		addWarning(warnings, fmt.Sprintf("Unsloth Studio not reachable at %s", base))
+		return unslothStudioStats{Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		addWarning(warnings, fmt.Sprintf("Unsloth Studio health check returned %d", resp.StatusCode))
+		return unslothStudioStats{Error: fmt.Sprintf("health %d", resp.StatusCode)}
+	}
+
+	stats := unslothStudioStats{Connected: true}
+
+	// If no token, we can still show connected status.
+	if studioToken == "" {
+		addWarning(warnings, "Unsloth Studio: set UNSLOTH_STUDIO_TOKEN or -unsloth-token for inference metrics")
+		return stats
+	}
+
+	// Inference status.
+	statusURL := base + "/api/inference/status"
+	statusResp, err := studioHTTPGet(ctx, statusURL, studioToken)
+	if err != nil {
+		stats.Error = "inference status unavailable: " + err.Error()
+	} else {
+		defer statusResp.Body.Close()
+		if statusResp.StatusCode == http.StatusOK {
+			stats.parseInferenceStatus(statusResp.Body)
+		} else {
+			stats.Error = fmt.Sprintf("inference status %d", statusResp.StatusCode)
+		}
+	}
+
+	// Training status.
+	trainURL := base + "/api/train/status"
+	trainResp, err := studioHTTPGet(ctx, trainURL, studioToken)
+	if err != nil {
+		// Non-fatal; training may simply not be running.
+	} else {
+		defer trainResp.Body.Close()
+		if trainResp.StatusCode == http.StatusOK {
+			stats.parseTrainStatus(trainResp.Body)
+		}
+	}
+
+	// Load progress.
+	loadURL := base + "/api/inference/load-progress"
+	loadResp, err := studioHTTPGet(ctx, loadURL, studioToken)
+	if err != nil {
+		// Non-fatal.
+	} else {
+		defer loadResp.Body.Close()
+		if loadResp.StatusCode == http.StatusOK {
+			stats.parseLoadProgress(loadResp.Body)
+		}
+	}
+
+	return stats
+}
+
+func (s *unslothStudioStats) parseInferenceStatus(body io.Reader) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return
+	}
+
+	var str string
+	var b bool
+	var num float64
+	var arr []string
+
+	if v, ok := raw["active_model"]; ok && json.Unmarshal(v, &str) == nil {
+		s.ActiveModel = str
+	}
+	if v, ok := raw["model_identifier"]; ok && json.Unmarshal(v, &str) == nil {
+		s.ModelIdentifier = str
+	}
+	if v, ok := raw["gguf_variant"]; ok && json.Unmarshal(v, &str) == nil {
+		s.GGUFVariant = str
+	}
+	if v, ok := raw["is_vision"]; ok && json.Unmarshal(v, &b) == nil {
+		s.IsVision = b
+	}
+	if v, ok := raw["is_audio"]; ok && json.Unmarshal(v, &b) == nil {
+		s.IsAudio = b
+	}
+	if v, ok := raw["supports_reasoning"]; ok && json.Unmarshal(v, &b) == nil {
+		s.SupportsReasoning = b
+	}
+	if v, ok := raw["loaded"]; ok && json.Unmarshal(v, &arr) == nil {
+		s.LoadedModels = arr
+	}
+	if v, ok := raw["loading"]; ok && json.Unmarshal(v, &arr) == nil {
+		s.LoadingModels = arr
+	}
+	if v, ok := raw["context_length"]; ok && json.Unmarshal(v, &num) == nil {
+		s.ContextLength = int(num)
+	}
+	if v, ok := raw["max_context_length"]; ok && json.Unmarshal(v, &num) == nil {
+		s.MaxContextLength = int(num)
+	}
+	if v, ok := raw["native_context_length"]; ok && json.Unmarshal(v, &num) == nil {
+		s.NativeContextLength = int(num)
+	}
+	if v, ok := raw["speculative_type"]; ok && json.Unmarshal(v, &str) == nil {
+		s.SpeculativeType = str
+	}
+	if v, ok := raw["tensor_parallel"]; ok && json.Unmarshal(v, &b) == nil {
+		s.TensorParallel = b
+	}
+}
+
+func (s *unslothStudioStats) parseTrainStatus(body io.Reader) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return
+	}
+
+	var str string
+	var num float64
+
+	if v, ok := raw["status"]; ok && json.Unmarshal(v, &str) == nil {
+		s.TrainStatus = str
+	}
+	if v, ok := raw["current_step"]; ok && json.Unmarshal(v, &num) == nil {
+		s.TrainStep = int(num)
+	}
+	if v, ok := raw["current_loss"]; ok && json.Unmarshal(v, &num) == nil {
+		s.TrainLoss = num
+	}
+	if v, ok := raw["current_lr"]; ok && json.Unmarshal(v, &num) == nil {
+		s.TrainLr = num
+	}
+}
+
+func (s *unslothStudioStats) parseLoadProgress(body io.Reader) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return
+	}
+
+	var str string
+	var num float64
+
+	if v, ok := raw["phase"]; ok && json.Unmarshal(v, &str) == nil {
+		s.LoadPhase = str
+	}
+	if v, ok := raw["bytes_loaded"]; ok && json.Unmarshal(v, &num) == nil {
+		s.LoadBytes = int64(num)
+	}
+	if v, ok := raw["bytes_total"]; ok && json.Unmarshal(v, &num) == nil {
+		s.LoadTotal = int64(num)
+	}
+}
+
+func studioHTTPGet(ctx context.Context, url string, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return http.DefaultClient.Do(req)
+}
+
 func runCommand(ctx context.Context, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
@@ -538,17 +750,17 @@ func parseOptFloat(raw string) optFloat {
 }
 
 func renderHeader(s snapshot, interval time.Duration, loading bool, width int) string {
-	status := "idle"
-	if loading {
-		status = "refreshing"
-	}
-
 	updated := "waiting for first sample"
 	if !s.CollectedAt.IsZero() {
 		updated = "updated " + s.CollectedAt.Format("15:04:05")
 	}
 
-	meta := fmt.Sprintf("%s | interval %s | %s", updated, trimDuration(interval), status)
+	statusStr := "loading..."
+	if !loading {
+		statusStr = "idle"
+	}
+
+	meta := fmt.Sprintf("%s | interval %s | %s", updated, trimDuration(interval), statusStr)
 	if s.CollectionMillis > 0 {
 		meta += fmt.Sprintf(" | collected in %dms", s.CollectionMillis)
 	}
@@ -572,12 +784,13 @@ func renderContent(s snapshot, width int) string {
 		return renderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
 	}
 
-	sections := make([]string, 0, 5)
+	sections := make([]string, 0, 6)
 	if len(s.Warnings) > 0 {
 		sections = append(sections, renderWarnings(s.Warnings, width))
 	}
 	sections = append(sections, renderSystem(s, width))
 	sections = append(sections, renderGPUSection(s.GPUs, width))
+	sections = append(sections, renderUnslothStudio(s.UnslothStudio, width))
 	sections = append(sections, renderOllamaProcesses(s.OllamaProcesses, width))
 	sections = append(sections, renderOllamaPS(s.OllamaPS, width))
 
@@ -753,6 +966,129 @@ func renderOllamaPS(output commandOutput, width int) string {
 	}
 
 	return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
+}
+
+func renderUnslothStudio(s unslothStudioStats, width int) string {
+	innerWidth := maxInt(20, width-6)
+
+	// Not connected at all.
+	if !s.Connected {
+		return renderCard("Unsloth Studio", mutedStyle.Render("Not reachable on :"+strconv.Itoa(studioPort)), width)
+	}
+
+	lines := make([]string, 0, 12)
+
+	// Active model line.
+	if s.ActiveModel != "" {
+		modelLine := valueStyle.Render(fitText(s.ActiveModel, innerWidth-2))
+		if s.GGUFVariant != "" {
+			modelLine += mutedStyle.Render("  " + s.GGUFVariant)
+		}
+		lines = append(lines, modelLine)
+	} else {
+		lines = append(lines, mutedStyle.Render("No active model"))
+	}
+
+	// Flags row.
+	flags := make([]string, 0, 4)
+	if s.IsVision {
+		flags = append(flags, labelStyle.Render("vision"))
+	}
+	if s.IsAudio {
+		flags = append(flags, labelStyle.Render("audio"))
+	}
+	if s.SupportsReasoning {
+		flags = append(flags, labelStyle.Render("reasoning"))
+	}
+	if s.TensorParallel {
+		flags = append(flags, labelStyle.Render("tensor-parallel"))
+	}
+	if len(flags) > 0 {
+		lines = append(lines, strings.Join(flags, " "))
+	}
+
+	// Context length.
+	if s.ContextLength > 0 {
+		ctxStr := fmt.Sprintf("ctx %s", formatTokenCount(s.ContextLength))
+		if s.MaxContextLength > 0 && s.MaxContextLength != s.ContextLength {
+			ctxStr += " / " + formatTokenCount(s.MaxContextLength)
+		}
+		if s.NativeContextLength > 0 && s.NativeContextLength != s.MaxContextLength {
+			ctxStr += " (native " + formatTokenCount(s.NativeContextLength) + ")"
+		}
+		lines = append(lines, labelStyle.Render(ctxStr))
+	}
+
+	// Speculative decoding.
+	if s.SpeculativeType != "" {
+		lines = append(lines, labelStyle.Render("spec "+s.SpeculativeType))
+	}
+
+	// Loading models.
+	if len(s.LoadingModels) > 0 {
+		for _, m := range s.LoadingModels {
+			lines = append(lines, warnStyle.Render("loading: ")+fitText(m, innerWidth-10))
+		}
+	}
+
+	// Load progress bar.
+	if s.LoadPhase != "" && s.LoadTotal > 0 {
+		pct := float64(s.LoadBytes) / float64(s.LoadTotal) * 100
+		barLabel := fmt.Sprintf("%s / %s", humanBytes(uint64(s.LoadBytes)), humanBytes(uint64(s.LoadTotal)))
+		lines = append(lines, metricLine("Load", pct, barLabel, innerWidth))
+	}
+
+	// Loaded models list.
+	if len(s.LoadedModels) > 0 && s.ActiveModel == "" {
+		lines = append(lines, "")
+		for _, m := range s.LoadedModels {
+			lines = append(lines, labelStyle.Render("  ")+fitText(m, innerWidth-4))
+		}
+	}
+
+	// Training section.
+	if s.TrainStatus != "" {
+		lines = append(lines, "")
+		lines = append(lines, sectionTitleStyle.Render("Training"))
+		statusStyle := mutedStyle
+		if s.TrainStatus == "running" {
+			statusStyle = barOKStyle
+		} else if s.TrainStatus == "error" {
+			statusStyle = barDangerStyle
+		} else if s.TrainStatus == "stopped" {
+			statusStyle = warnStyle
+		}
+		lines = append(lines, statusStyle.Render(s.TrainStatus))
+		if s.TrainStep > 0 {
+			trainLine := fmt.Sprintf("step %d", s.TrainStep)
+			if s.TrainLoss > 0 {
+				trainLine += fmt.Sprintf("  loss %.4f", s.TrainLoss)
+			}
+			if s.TrainLr > 0 {
+				trainLine += fmt.Sprintf("  lr %.2e", s.TrainLr)
+			}
+			lines = append(lines, labelStyle.Render(trainLine))
+		}
+	}
+
+	// Error at bottom.
+	if s.Error != "" {
+		lines = append(lines, "")
+		lines = append(lines, warnStyle.Render("! ")+fitText(s.Error, innerWidth-4))
+	}
+
+	return renderCard("Unsloth Studio", strings.Join(lines, "\n"), width)
+}
+
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%dK", n/1000)
+	default:
+		return strconv.Itoa(n)
+	}
 }
 
 func renderCard(title, body string, width int) string {
