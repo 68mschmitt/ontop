@@ -1,6 +1,6 @@
 # ontop
 
-`ontop` is a local terminal dashboard for watching Ollama, NVIDIA GPUs, CPU, and RAM while your machine politely pretends that running large language models is a normal hobby.
+`ontop` is a local terminal dashboard for watching Ollama, NVIDIA and AMD GPUs, CPU, and RAM while your machine politely pretends that running large language models is a normal hobby.
 
 It is like `top`, if `top` had heard about local AI and immediately started asking your GPU uncomfortable questions.
 
@@ -37,8 +37,10 @@ It watches the important bits without making you juggle five terminals, three `w
 ## Requirements
 
 - Go 1.21 or newer to build the little goblin.
-- `nvidia-smi` from the NVIDIA driver stack for GPU metrics.
+- `nvidia-smi` from the NVIDIA driver stack for NVIDIA GPU metrics, when present.
+- `amdgpu_top` for AMD GPU metrics, when present.
 - `ollama` on `PATH` if you want the loaded model list from `ollama ps`.
+- Unsloth Studio is optional and discovered on its configured port or common local ports.
 
 No NVIDIA GPU? No Ollama daemon? `nvidia-smi` went out for milk and never came back?
 
@@ -82,10 +84,12 @@ Supported interval examples include `500ms`, `1s`, `2s`, and whatever duration m
 `ontop` currently keeps an eye on:
 
 - NVIDIA GPU name, index, utilization, VRAM, temperature, power, fan speed, and active compute processes via `nvidia-smi --query-* --format=csv,noheader,nounits`.
+- AMD GPU name, PCI address, utilization, VRAM, temperature, power, and per-process VRAM/GTT via `amdgpu_top --json`.
 - RAM used, total, available, and percent via `gopsutil`.
 - Total CPU and per-core CPU usage via `gopsutil`.
 - Ollama-related local processes with PID, command, CPU, RAM, RSS, and runtime via `gopsutil`.
-- Loaded or running Ollama models from `ollama ps` when available.
+- Loaded Ollama models from `ollama ps`, including size, CPU/GPU placement, context, and expiry when available.
+- Unsloth Studio active model, context, loading, training, throughput, and parallel-session metrics when its API exposes them.
 
 In short: it watches the silicon, the memory, the model goblins, and the little daemon friends that make your laptop sound like it is preparing for takeoff.
 
@@ -110,8 +114,10 @@ This is not a replacement for the classics. This is a tiny specialized gremlin s
 `ontop` tries to be chill.
 
 - If `nvidia-smi` is missing, GPU metrics are unavailable.
+- If `amdgpu_top` is missing, AMD GPU metrics are unavailable.
 - If there is no NVIDIA GPU, GPU metrics are unavailable.
 - If `ollama` is missing, `ollama ps` output is unavailable.
+- Missing optional services are omitted from the dashboard rather than shown as empty cards.
 - If Ollama is installed but not doing anything, `ontop` will not invent drama.
 
 That last one is important. This is a dashboard, not a horoscope.
@@ -138,12 +144,18 @@ go build -o ontop .
 
 Then run it, stare at the bars, nod thoughtfully, and say "interesting" even if everything is fine.
 
+Print the build version without starting the dashboard:
+
+```sh
+./ontop -version
+```
+
 ## Name Lore
 
 The project is named `ontop` because:
 
 - `o` is for Ollama.
-- `n` is for NVIDIA.
+- `n` is for NVIDIA, with AMD now invited to the telemetry party too.
 - `top` is for the noble Unix lineage of terminal dashboards that show you what the machine is doing instead of what you hoped it was doing.
 
 It is short, searchable-ish, mildly cursed, and just clever enough that explaining it makes the joke both better and worse.

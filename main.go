@@ -21,12 +21,14 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/process"
 )
 
 const defaultInterval = time.Second
+const version = "dev"
 
 // Global CLI config for collectors that need it.
 var studioPort = 8888
@@ -42,6 +44,7 @@ type snapshot struct {
 	CPU              cpuStats
 	Memory           memoryStats
 	GPUs             []gpuStats
+	AMDGPUs          []amdGPUStats
 	OllamaProcesses  []ollamaProcess
 	OllamaPS         commandOutput
 	UnslothStudio    unslothStudioStats
@@ -84,6 +87,25 @@ type gpuProcess struct {
 	UsedMemoryMB optFloat
 }
 
+type amdGPUStats struct {
+	Index       string
+	PCI         string
+	Name        string
+	UtilPercent optFloat
+	MemoryUsed  optFloat
+	MemoryTotal optFloat
+	Temperature optFloat
+	PowerDraw   optFloat
+	Processes   []amdGPUProcess
+}
+
+type amdGPUProcess struct {
+	PID     int32
+	Name    string
+	VRAMMiB optFloat
+	GTTMiB  optFloat
+}
+
 type ollamaProcess struct {
 	PID           int32
 	Name          string
@@ -99,6 +121,16 @@ type commandOutput struct {
 	Output  string
 	Error   string
 	Missing bool
+	Models  []ollamaModel
+}
+
+type ollamaModel struct {
+	Name      string
+	ID        string
+	Size      string
+	Processor string
+	Context   string
+	Until     string
 }
 
 type unslothStudioStats struct {
@@ -114,6 +146,9 @@ type unslothStudioStats struct {
 	ContextLength       int
 	MaxContextLength    int
 	NativeContextLength int
+	CurrentContext      int
+	ConcurrentSessions  int
+	TokensPerSecond     optFloat
 	SpeculativeType     string
 	TensorParallel      bool
 	TrainStatus         string
@@ -189,9 +224,14 @@ var (
 
 func main() {
 	interval := flag.Duration("interval", defaultInterval, "refresh interval such as 500ms, 1s, or 2s")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.IntVar(&studioPort, "unsloth-port", 8888, "Unsloth Studio API port")
 	flag.StringVar(&studioToken, "unsloth-token", "", "Unsloth Studio API Bearer token (or set UNSLOTH_STUDIO_TOKEN)")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("ontop " + version)
+		return
+	}
 
 	// Support env var as fallback for token.
 	if studioToken == "" {
@@ -313,6 +353,7 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.CPU = collectCPU(ctx, &s.Warnings)
 	s.Memory = collectMemory(ctx, &s.Warnings)
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
+	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
 	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
@@ -361,7 +402,6 @@ func collectMemory(ctx context.Context, warnings *[]string) memoryStats {
 
 func collectNVIDIA(ctx context.Context, warnings *[]string) []gpuStats {
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		addWarning(warnings, "nvidia-smi not found; NVIDIA GPU metrics unavailable")
 		return nil
 	}
 
@@ -396,6 +436,25 @@ func collectNVIDIA(ctx context.Context, warnings *[]string) []gpuStats {
 	return gpus
 }
 
+func collectAMD(ctx context.Context, warnings *[]string) []amdGPUStats {
+	if _, err := exec.LookPath("amdgpu_top"); err != nil {
+		return nil
+	}
+
+	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
+	if err != nil {
+		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
+		return nil
+	}
+
+	gpus, err := parseAMDJSON(stdout)
+	if err != nil {
+		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
+		return nil
+	}
+	return gpus
+}
+
 func parseGPUCSV(output string) ([]gpuStats, error) {
 	records, err := readCSV(output)
 	if err != nil {
@@ -423,6 +482,138 @@ func parseGPUCSV(output string) ([]gpuStats, error) {
 	}
 
 	return gpus, nil
+}
+
+type amdTopDocument struct {
+	Devices []amdTopDevice `json:"devices"`
+}
+
+type amdTopDevice struct {
+	Info struct {
+		DeviceName string `json:"DeviceName"`
+		DevicePath struct {
+			PCI string `json:"pci"`
+		} `json:"DevicePath"`
+	} `json:"Info"`
+	GPUActivity map[string]json.RawMessage `json:"gpu_activity"`
+	Sensors     map[string]json.RawMessage `json:"Sensors"`
+	VRAM        map[string]json.RawMessage `json:"VRAM"`
+	FDInfo      map[string]json.RawMessage `json:"fdinfo"`
+}
+
+func parseAMDJSON(output string) ([]amdGPUStats, error) {
+	var document amdTopDocument
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &document); err != nil {
+		return nil, err
+	}
+
+	gpus := make([]amdGPUStats, 0, len(document.Devices))
+	for i, device := range document.Devices {
+		gpu := amdGPUStats{
+			Index:       strconv.Itoa(i),
+			PCI:         device.Info.DevicePath.PCI,
+			Name:        device.Info.DeviceName,
+			UtilPercent: amdMetric(device.GPUActivity, "GFX"),
+			MemoryUsed:  amdMetric(device.VRAM, "Total VRAM Usage"),
+			MemoryTotal: amdMetric(device.VRAM, "Total VRAM"),
+			Temperature: firstAMDMetric(device.Sensors, "Junction Temperature", "Edge Temperature"),
+			PowerDraw:   firstAMDMetric(device.Sensors, "Average Power", "GFX Power", "Input Power"),
+			Processes:   parseAMDProcesses(device.FDInfo),
+		}
+		if gpu.Name == "" {
+			gpu.Name = "AMD GPU"
+		}
+		gpus = append(gpus, gpu)
+	}
+
+	return gpus, nil
+}
+
+func parseAMDProcesses(raw map[string]json.RawMessage) []amdGPUProcess {
+	processes := make([]amdGPUProcess, 0, len(raw))
+	for pidString, processRaw := range raw {
+		pid, err := strconv.ParseInt(pidString, 10, 32)
+		if err != nil {
+			continue
+		}
+
+		name, vram, gtt := parseAMDProcess(processRaw)
+		processes = append(processes, amdGPUProcess{
+			PID:     int32(pid),
+			Name:    name,
+			VRAMMiB: vram,
+			GTTMiB:  gtt,
+		})
+	}
+
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].PID < processes[j].PID
+	})
+	return processes
+}
+
+func parseAMDProcess(raw json.RawMessage) (string, optFloat, optFloat) {
+	var current map[string]json.RawMessage
+	if json.Unmarshal(raw, &current) != nil {
+		return "", optFloat{}, optFloat{}
+	}
+
+	name := ""
+	if value, ok := current["name"]; ok {
+		_ = json.Unmarshal(value, &name)
+	}
+
+	for depth := 0; depth < 4; depth++ {
+		if value, ok := current["VRAM"]; ok {
+			return name, amdMetricValue(value), amdNestedMetric(current, "GTT")
+		}
+		value, ok := current["usage"]
+		if !ok || json.Unmarshal(value, &current) != nil {
+			break
+		}
+	}
+
+	return name, optFloat{}, optFloat{}
+}
+
+func amdNestedMetric(metrics map[string]json.RawMessage, key string) optFloat {
+	value, ok := metrics[key]
+	if !ok {
+		return optFloat{}
+	}
+	return amdMetricValue(value)
+}
+
+func amdMetric(metrics map[string]json.RawMessage, key string) optFloat {
+	value, ok := metrics[key]
+	if !ok {
+		return optFloat{}
+	}
+	return amdMetricValue(value)
+}
+
+func firstAMDMetric(metrics map[string]json.RawMessage, keys ...string) optFloat {
+	for _, key := range keys {
+		if value := amdMetric(metrics, key); value.OK {
+			return value
+		}
+	}
+	return optFloat{}
+}
+
+func amdMetricValue(raw json.RawMessage) optFloat {
+	var value struct {
+		Value *float64 `json:"value"`
+	}
+	if json.Unmarshal(raw, &value) == nil && value.Value != nil {
+		return optFloat{Value: *value.Value, OK: true}
+	}
+
+	var number float64
+	if json.Unmarshal(raw, &number) == nil {
+		return optFloat{Value: number, OK: true}
+	}
+	return optFloat{}
 }
 
 func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
@@ -537,30 +728,62 @@ func collectOllamaPS(ctx context.Context) commandOutput {
 		return commandOutput{Error: cleanCommandError(err, stderr)}
 	}
 
-	return commandOutput{Output: strings.TrimSpace(stdout)}
+	output := strings.TrimSpace(stdout)
+	return commandOutput{Output: output, Models: parseOllamaPS(output)}
+}
+
+func parseOllamaPS(output string) []ollamaModel {
+	var models []ollamaModel
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || strings.EqualFold(fields[0], "name") {
+			continue
+		}
+
+		processorStart := -1
+		contextIndex := -1
+		for i := 2; i < len(fields); i++ {
+			if strings.Contains(fields[i], "%") {
+				processorStart = i
+				break
+			}
+		}
+		if processorStart < 0 {
+			continue
+		}
+		for i := processorStart + 1; i < len(fields); i++ {
+			contextField := strings.ToUpper(strings.TrimSuffix(fields[i], ","))
+			if _, err := strconv.ParseInt(contextField, 10, 64); err == nil || strings.HasSuffix(contextField, "K") || strings.HasSuffix(contextField, "M") {
+				contextIndex = i
+				break
+			}
+		}
+		if contextIndex < 0 {
+			continue
+		}
+
+		models = append(models, ollamaModel{
+			Name:      fields[0],
+			ID:        fields[1],
+			Size:      strings.Join(fields[2:processorStart], " "),
+			Processor: strings.Join(fields[processorStart:contextIndex], " "),
+			Context:   fields[contextIndex],
+			Until:     strings.Join(fields[contextIndex+1:], " "),
+		})
+	}
+	return models
 }
 
 func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudioStats {
-	base := fmt.Sprintf("http://127.0.0.1:%d", studioPort)
-
-	// Health check (unauthenticated).
-	healthURL := base + "/api/health"
-	resp, err := studioHTTPGet(ctx, healthURL, "")
-	if err != nil {
-		addWarning(warnings, fmt.Sprintf("Unsloth Studio not reachable at %s", base))
-		return unslothStudioStats{Error: err.Error()}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		addWarning(warnings, fmt.Sprintf("Unsloth Studio health check returned %d", resp.StatusCode))
-		return unslothStudioStats{Error: fmt.Sprintf("health %d", resp.StatusCode)}
+	base := discoverStudioBase(ctx)
+	if base == "" {
+		return unslothStudioStats{}
 	}
 
 	stats := unslothStudioStats{Connected: true}
 
 	// If no token, we can still show connected status.
 	if studioToken == "" {
-		addWarning(warnings, "Unsloth Studio: set UNSLOTH_STUDIO_TOKEN or -unsloth-token for inference metrics")
 		return stats
 	}
 
@@ -603,6 +826,38 @@ func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudio
 	}
 
 	return stats
+}
+
+func discoverStudioBase(ctx context.Context) string {
+	if configured := strings.TrimRight(strings.TrimSpace(os.Getenv("UNSLOTH_STUDIO_URL")), "/"); configured != "" {
+		if studioHealthOK(ctx, configured) {
+			return configured
+		}
+		return ""
+	}
+
+	ports := []int{studioPort}
+	if studioPort == 8888 {
+		ports = append(ports, 8000, 3000, 8080)
+	}
+	for _, port := range ports {
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		if studioHealthOK(ctx, base) {
+			return base
+		}
+	}
+	return ""
+}
+
+func studioHealthOK(ctx context.Context, base string) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	resp, err := studioHTTPGet(probeCtx, base+"/api/health", "")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func (s *unslothStudioStats) parseInferenceStatus(body io.Reader) {
@@ -649,12 +904,45 @@ func (s *unslothStudioStats) parseInferenceStatus(body io.Reader) {
 	if v, ok := raw["native_context_length"]; ok && json.Unmarshal(v, &num) == nil {
 		s.NativeContextLength = int(num)
 	}
+	if num, ok := findJSONNumber(raw, "current_context", "current_context_length", "context_used", "context_tokens"); ok {
+		s.CurrentContext = int(num)
+	}
+	if num, ok := findJSONNumber(raw, "concurrent_sessions", "active_sessions", "active_requests", "num_active_requests", "parallel_sessions", "parallel_requests"); ok {
+		s.ConcurrentSessions = int(num)
+	}
+	if num, ok := findJSONNumber(raw, "tokens_per_second", "tokens_sec", "throughput", "generation_tokens_per_second"); ok {
+		s.TokensPerSecond = optFloat{Value: num, OK: true}
+	}
 	if v, ok := raw["speculative_type"]; ok && json.Unmarshal(v, &str) == nil {
 		s.SpeculativeType = str
 	}
 	if v, ok := raw["tensor_parallel"]; ok && json.Unmarshal(v, &b) == nil {
 		s.TensorParallel = b
 	}
+}
+
+func findJSONNumber(raw map[string]json.RawMessage, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			var number float64
+			if json.Unmarshal(value, &number) == nil {
+				return number, true
+			}
+		}
+	}
+	for _, containerKey := range []string{"metrics", "stats", "inference"} {
+		value, ok := raw[containerKey]
+		if !ok {
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(value, &nested) == nil {
+			if number, ok := findJSONNumber(nested, keys...); ok {
+				return number, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func (s *unslothStudioStats) parseTrainStatus(body io.Reader) {
@@ -784,15 +1072,24 @@ func renderContent(s snapshot, width int) string {
 		return renderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
 	}
 
-	sections := make([]string, 0, 6)
+	sections := make([]string, 0, 7)
 	if len(s.Warnings) > 0 {
-		sections = append(sections, renderWarnings(s.Warnings, width))
+		if notices := renderWarnings(s.Warnings, width); notices != "" {
+			sections = append(sections, notices)
+		}
 	}
-	sections = append(sections, renderSystem(s, width))
-	sections = append(sections, renderGPUSection(s.GPUs, width))
-	sections = append(sections, renderUnslothStudio(s.UnslothStudio, width))
-	sections = append(sections, renderOllamaProcesses(s.OllamaProcesses, width))
-	sections = append(sections, renderOllamaPS(s.OllamaPS, width))
+	for _, section := range []string{
+		renderSystem(s, width),
+		renderGPUSection(s.GPUs, width),
+		renderAMDSection(s.AMDGPUs, width),
+		renderUnslothStudio(s.UnslothStudio, width),
+		renderOllamaProcesses(s.OllamaProcesses, width),
+		renderOllamaPS(s.OllamaPS, width),
+	} {
+		if strings.TrimSpace(section) != "" {
+			sections = append(sections, section)
+		}
+	}
 
 	return strings.Join(sections, "\n\n")
 }
@@ -853,7 +1150,7 @@ func renderMemory(stats memoryStats, width int) string {
 
 func renderGPUSection(gpus []gpuStats, width int) string {
 	if len(gpus) == 0 {
-		return renderCard("NVIDIA GPU", mutedStyle.Render("No NVIDIA GPU metrics available."), width)
+		return ""
 	}
 
 	lines := make([]string, 0)
@@ -894,7 +1191,60 @@ func renderGPUSection(gpus []gpuStats, width int) string {
 	return renderCard("NVIDIA GPU", strings.Join(lines, "\n"), width)
 }
 
+func renderAMDSection(gpus []amdGPUStats, width int) string {
+	if len(gpus) == 0 {
+		return ""
+	}
+
+	innerWidth := maxInt(20, width-6)
+	lines := make([]string, 0, len(gpus)*6)
+	for i, gpu := range gpus {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+
+		title := fmt.Sprintf("GPU %s", gpu.Index)
+		if gpu.Name != "" {
+			title += "  " + gpu.Name
+		}
+		if gpu.PCI != "" {
+			title += "  " + gpu.PCI
+		}
+		lines = append(lines, valueStyle.Render(fitText(title, innerWidth)))
+		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), optPercentString(gpu.UtilPercent), innerWidth))
+
+		vramPercent := 0.0
+		if gpu.MemoryUsed.OK && gpu.MemoryTotal.OK && gpu.MemoryTotal.Value > 0 {
+			vramPercent = gpu.MemoryUsed.Value / gpu.MemoryTotal.Value * 100
+		}
+		vramValue := fmt.Sprintf("%s / %s (%.1f%%)", optMemoryString(gpu.MemoryUsed), optMemoryString(gpu.MemoryTotal), vramPercent)
+		lines = append(lines, metricLine("VRAM", vramPercent, vramValue, innerWidth))
+		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})))
+
+		if len(gpu.Processes) == 0 {
+			lines = append(lines, mutedStyle.Render("No active GPU processes."))
+		} else {
+			lines = append(lines, renderAMDProcessTable(gpu.Processes, innerWidth))
+		}
+	}
+
+	return renderCard("AMD GPU", strings.Join(lines, "\n"), width)
+}
+
 func renderGPUProcessTable(processes []gpuProcess, width int) string {
+	if width < 38 {
+		processWidth := maxInt(8, width-18)
+		lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
+		for _, p := range processes {
+			name := p.Name
+			if name == "" {
+				name = "unknown"
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.UsedMemoryMB), fitText(name, processWidth)))
+		}
+		return strings.Join(lines, "\n")
+	}
+
 	processWidth := maxInt(12, width-19)
 	lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
 	for _, p := range processes {
@@ -908,9 +1258,35 @@ func renderGPUProcessTable(processes []gpuProcess, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderAMDProcessTable(processes []amdGPUProcess, width int) string {
+	if width < 48 {
+		processWidth := maxInt(8, width-18)
+		lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
+		for _, p := range processes {
+			name := p.Name
+			if name == "" {
+				name = "unknown"
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	processWidth := maxInt(12, width-29)
+	lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %-9s %s", "PID", "VRAM", "GTT", "PROCESS"))}
+	for _, p := range processes {
+		name := p.Name
+		if name == "" {
+			name = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, optMemoryString(p.VRAMMiB), optMemoryString(p.GTTMiB), fitText(name, processWidth)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderOllamaProcesses(processes []ollamaProcess, width int) string {
 	if len(processes) == 0 {
-		return renderCard("Ollama Processes", mutedStyle.Render("No Ollama-related processes found."), width)
+		return ""
 	}
 
 	innerWidth := maxInt(20, width-6)
@@ -949,17 +1325,38 @@ func renderOllamaProcesses(processes []ollamaProcess, width int) string {
 }
 
 func renderOllamaPS(output commandOutput, width int) string {
-	if output.Missing {
-		return renderCard("Ollama Models", mutedStyle.Render(output.Error), width)
-	}
-	if output.Error != "" {
-		return renderCard("Ollama Models", warnStyle.Render("ollama ps unavailable: ")+fitText(output.Error, maxInt(10, width-24)), width)
-	}
-	if strings.TrimSpace(output.Output) == "" {
-		return renderCard("Ollama Models", mutedStyle.Render("No loaded models reported by ollama ps."), width)
+	if output.Missing || output.Error != "" || strings.TrimSpace(output.Output) == "" {
+		return ""
 	}
 
 	innerWidth := maxInt(20, width-6)
+	if len(output.Models) > 0 {
+		if innerWidth < 64 {
+			nameWidth := maxInt(10, innerWidth-18)
+			lines := []string{labelStyle.Render(fitText("MODEL  CONTEXT", innerWidth))}
+			for _, model := range output.Models {
+				line := fmt.Sprintf("%-*s %s", nameWidth, fitText(model.Name, nameWidth), model.Context)
+				lines = append(lines, fitText(line, innerWidth))
+			}
+			return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
+		}
+
+		nameWidth := clampInt(innerWidth/3, 12, 30)
+		lines := []string{labelStyle.Render(fmt.Sprintf("%-*s %-14s %-12s %-8s %s", nameWidth, "MODEL", "SIZE", "PROCESSOR", "CTX", "UNTIL"))}
+		for _, model := range output.Models {
+			line := fmt.Sprintf("%-*s %-14s %-12s %-8s %s",
+				nameWidth,
+				fitText(model.Name, nameWidth),
+				fitText(model.Size, 14),
+				fitText(model.Processor, 12),
+				model.Context,
+				fitText(model.Until, maxInt(8, innerWidth-nameWidth-39)),
+			)
+			lines = append(lines, fitText(line, innerWidth))
+		}
+		return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
+	}
+
 	lines := strings.Split(strings.TrimRight(output.Output, "\n"), "\n")
 	for i := range lines {
 		lines[i] = fitText(lines[i], innerWidth)
@@ -973,7 +1370,7 @@ func renderUnslothStudio(s unslothStudioStats, width int) string {
 
 	// Not connected at all.
 	if !s.Connected {
-		return renderCard("Unsloth Studio", mutedStyle.Render("Not reachable on :"+strconv.Itoa(studioPort)), width)
+		return ""
 	}
 
 	lines := make([]string, 0, 12)
@@ -1017,6 +1414,15 @@ func renderUnslothStudio(s unslothStudioStats, width int) string {
 			ctxStr += " (native " + formatTokenCount(s.NativeContextLength) + ")"
 		}
 		lines = append(lines, labelStyle.Render(ctxStr))
+	}
+	if s.CurrentContext > 0 {
+		lines = append(lines, labelStyle.Render("used "+formatTokenCount(s.CurrentContext)))
+	}
+	if s.ConcurrentSessions > 0 {
+		lines = append(lines, labelStyle.Render(fmt.Sprintf("parallel sessions %d", s.ConcurrentSessions)))
+	}
+	if s.TokensPerSecond.OK {
+		lines = append(lines, labelStyle.Render(fmt.Sprintf("throughput %.1f tok/s", s.TokensPerSecond.Value)))
 	}
 
 	// Speculative decoding.
@@ -1102,8 +1508,13 @@ func renderCard(title, body string, width int) string {
 
 func metricLine(label string, percent float64, value string, width int) string {
 	labelWidth := 8
-	valueWidth := lipgloss.Width(value)
-	barWidth := clampInt(width-labelWidth-valueWidth-5, 8, 28)
+	value = fitText(value, maxInt(8, width-labelWidth-2))
+	valueWidth := runewidth.StringWidth(value)
+	barWidth := width - labelWidth - valueWidth - 2
+	if barWidth < 3 {
+		return fmt.Sprintf("%s %s", labelStyle.Width(labelWidth).Render(label), value)
+	}
+	barWidth = clampInt(barWidth, 3, 28)
 
 	return fmt.Sprintf("%s %s %s",
 		labelStyle.Width(labelWidth).Render(label),
@@ -1118,32 +1529,40 @@ func renderCoreCell(index int, percent float64, width int) string {
 }
 
 func renderCoreRow(perCore []float64, width int) string {
+	if len(perCore) == 0 || width <= 0 {
+		return ""
+	}
+
+	compact := make([]string, len(perCore))
+	for i, percent := range perCore {
+		compact[i] = fmt.Sprintf("C%d:%.0f%%", i, percent)
+	}
 	cells := make([]string, len(perCore))
 	for i, percent := range perCore {
 		cells[i] = renderCoreCell(i, percent, 18)
 	}
-	row := strings.Join(cells, " ")
-	if lipgloss.Width(row) <= width {
-		return row
+	if runewidth.StringWidth(strings.Join(cells, " ")) <= width {
+		return strings.Join(cells, " ")
 	}
 
-	for i, percent := range perCore {
-		cells[i] = fmt.Sprintf("C%d:%.0f%%", i, percent)
+	lines := make([]string, 0, len(compact))
+	line := ""
+	for _, cell := range compact {
+		candidate := cell
+		if line != "" {
+			candidate = line + " " + cell
+		}
+		if line != "" && runewidth.StringWidth(candidate) > width {
+			lines = append(lines, line)
+			line = cell
+			continue
+		}
+		line = candidate
 	}
-	row = strings.Join(cells, " ")
-	if lipgloss.Width(row) <= width {
-		return row
+	if line != "" {
+		lines = append(lines, line)
 	}
-
-	for i, percent := range perCore {
-		cells[i] = fmt.Sprintf("%d:%.0f", i, percent)
-	}
-	row = strings.Join(cells, " ")
-	if lipgloss.Width(row) <= width {
-		return row
-	}
-
-	return mutedStyle.Render("Per-core CPU hidden; terminal is too narrow for one row.")
+	return strings.Join(lines, "\n")
 }
 
 func renderBar(percent float64, width int) string {
@@ -1297,18 +1716,13 @@ func fitText(text string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(text) <= width {
+	if runewidth.StringWidth(text) <= width {
 		return text
 	}
 	if width <= 3 {
 		return strings.Repeat(".", width)
 	}
-
-	runes := []rune(text)
-	if len(runes) <= width {
-		return text
-	}
-	return string(runes[:width-3]) + "..."
+	return runewidth.Truncate(text, width, "...")
 }
 
 func clampFloat(value, minValue, maxValue float64) float64 {
