@@ -46,6 +46,21 @@ ornith-1.5:9b-opencode abcdef123456 5.0 GB 100% GPU 262144 4 minutes from now`
 	}
 }
 
+func TestParseOllamaPSJSONWithTokens(t *testing.T) {
+	output := `[{"name":"qwen2.5:14b","id":"abc123","size":14000000000,"context_length":8192,"prompt_tokens":1520,"output_tokens":340},{"name":"llama3:8b","id":"def456","size":8000000000,"context_length":4096,"prompt_tokens":800,"output_tokens":120}]`
+
+	models := parseOllamaPSJSON(output)
+	if len(models) != 2 {
+		t.Fatalf("got %d models, want 2", len(models))
+	}
+	if models[0].CtxTokens != 8192 || models[0].PromptTokens != 1520 {
+		t.Fatalf("unexpected token counts for model 0: ctx=%d want 8192, prompt=%d want 1520", models[0].CtxTokens, models[0].PromptTokens)
+	}
+	if models[1].CtxTokens != 4096 || models[1].PromptTokens != 800 {
+		t.Fatalf("unexpected token counts for model 1: ctx=%d want 4096, prompt=%d want 800", models[1].CtxTokens, models[1].PromptTokens)
+	}
+}
+
 func TestFitTextUsesDisplayWidth(t *testing.T) {
 	text := fitText("模型名称 abc", 10)
 	if width := runewidth.StringWidth(text); width > 10 {

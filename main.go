@@ -212,12 +212,14 @@ type commandOutput struct {
 }
 
 type ollamaModel struct {
-	Name      string
-	ID        string
-	Size      string
-	Processor string
-	Context   string
-	Until     string
+	Name         string
+	ID           string
+	Size         string
+	Processor    string
+	Context      string
+	Until        string
+	PromptTokens int
+	CtxTokens    int
 }
 
 type unslothStudioStats struct {
@@ -1403,11 +1405,14 @@ func parseOllamaPSJSON(output string) []ollamaModel {
 	var models []ollamaModel
 
 	type ollamaLine struct {
-		Name         string  `json:"name"`
-		Id           string  `json:"id"`
-		Size         float64 `json:"size"`
-		SizeVRAM     float64 `json:"size_vram"`
-		TransferRate string  `json:"transfer_rate"`
+		Name          string  `json:"name"`
+		Id            string  `json:"id"`
+		Size          float64 `json:"size"`
+		SizeVRAM      float64 `json:"size_vram"`
+		TransferRate  string  `json:"transfer_rate"`
+		ContextLength int     `json:"context_length"`
+		PromptTokens  int     `json:"prompt_tokens"`
+		OutputTokens  int     `json:"output_tokens"`
 	}
 
 	var lines []ollamaLine
@@ -1418,9 +1423,11 @@ func parseOllamaPSJSON(output string) []ollamaModel {
 	for _, l := range lines {
 		sizeGB := l.Size / 1e9
 		models = append(models, ollamaModel{
-			Name: l.Name,
-			ID:   l.Id,
-			Size: fmt.Sprintf("%.1f GB", sizeGB),
+			Name:         l.Name,
+			ID:           l.Id,
+			Size:         fmt.Sprintf("%.1f GB", sizeGB),
+			PromptTokens: l.PromptTokens,
+			CtxTokens:    l.ContextLength,
 		})
 	}
 
@@ -2487,16 +2494,33 @@ func renderOllamaPS(output commandOutput, width int, disabledSections map[string
 		if innerWidth < 64 {
 			nameWidth := maxInt(10, innerWidth-18)
 			lines := []string{labelStyle.Render(fitText("MODEL  CONTEXT", innerWidth))}
+			var totalCtx, totalPrompt int
 			for _, model := range output.Models {
+				totalCtx += model.CtxTokens
+				totalPrompt += model.PromptTokens
 				line := fmt.Sprintf("%-*s %s", nameWidth, fitText(model.Name, nameWidth), model.Context)
 				lines = append(lines, fitText(line, innerWidth))
+			}
+			if totalCtx > 0 || totalPrompt > 0 {
+				lines = append(lines, "")
+				var tokenParts []string
+				if totalCtx > 0 {
+					tokenParts = append(tokenParts, fmt.Sprintf("tokens %s", formatTokenCount(totalCtx)))
+				}
+				if totalPrompt > 0 {
+					tokenParts = append(tokenParts, fmt.Sprintf("prompt %s", formatTokenCount(totalPrompt)))
+				}
+				lines = append(lines, valueStyle.Render("  "+strings.Join(tokenParts, "  ")))
 			}
 			return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
 		}
 
 		nameWidth := clampInt(innerWidth/3, 12, 30)
 		lines := []string{labelStyle.Render(fmt.Sprintf("%-*s %-14s %-12s %-8s %s", nameWidth, "MODEL", "SIZE", "PROCESSOR", "CTX", "UNTIL"))}
+		var totalCtx, totalPrompt int
 		for _, model := range output.Models {
+			totalCtx += model.CtxTokens
+			totalPrompt += model.PromptTokens
 			line := fmt.Sprintf("%-*s %-14s %-12s %-8s %s",
 				nameWidth,
 				fitText(model.Name, nameWidth),
@@ -2506,6 +2530,17 @@ func renderOllamaPS(output commandOutput, width int, disabledSections map[string
 				fitText(model.Until, maxInt(8, innerWidth-nameWidth-39)),
 			)
 			lines = append(lines, fitText(line, innerWidth))
+		}
+		if totalCtx > 0 || totalPrompt > 0 {
+			lines = append(lines, "")
+			var tokenParts []string
+			if totalCtx > 0 {
+				tokenParts = append(tokenParts, fmt.Sprintf("tokens %s", formatTokenCount(totalCtx)))
+			}
+			if totalPrompt > 0 {
+				tokenParts = append(tokenParts, fmt.Sprintf("prompt %s", formatTokenCount(totalPrompt)))
+			}
+			lines = append(lines, valueStyle.Render("  "+strings.Join(tokenParts, "  ")))
 		}
 		return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
 	}
