@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -36,219 +35,6 @@ const version = "dev"
 // Global CLI config for collectors that need it.
 var studioPort = 8888
 var studioToken = ""
-
-type optFloat struct {
-	Value float64
-	OK    bool
-}
-
-type snapshot struct {
-	CollectedAt      time.Time
-	CPU              cpuStats
-	Memory           memoryStats
-	Swap             swapMemoryStats
-	Thermal          thermalStats
-	GPUs             []gpuStats
-	AMDGPUs          []amdGPUStats
-	Disk             diskStats
-	Net              netStats
-	Inference        []inferenceProcess
-	OllamaProcesses  []ollamaProcess
-	OllamaPS         commandOutput
-	UnslothStudio    unslothStudioStats
-	GPUSparkline     map[string][]float64
-	CPUHistory       []float64
-	RAMHistory       []float64
-	Warnings         []string
-	CollectionMillis int64
-}
-
-type inferenceProcess struct {
-	PID      int32
-	Provider string
-	Name     string
-	VRAMMiB  optFloat
-	GTTMiB   optFloat
-}
-
-type cpuStats struct {
-	OK      bool
-	Total   float64
-	PerCore []float64
-}
-
-type memoryStats struct {
-	OK        bool
-	Used      uint64
-	Total     uint64
-	Available uint64
-	Percent   float64
-}
-
-type swapMemoryStats struct {
-	OK    bool
-	Used  uint64
-	Total uint64
-}
-
-type thermalStats struct {
-	OK    bool
-	Zone  []thermalZone
-	Total optFloat
-}
-
-type thermalZone struct {
-	Index       int
-	Type        string
-	Temperature optFloat
-}
-
-type diskStats struct {
-	OK       bool
-	Devices  []diskDeviceStats
-	Warnings []string
-	Rates    []diskDeviceRates
-}
-
-type diskDeviceStats struct {
-	Name       string
-	ReadBytes  uint64
-	WriteBytes uint64
-	ReadIOss   uint64
-	WriteIOSS  uint64
-}
-
-type diskDeviceRates struct {
-	Name     string
-	ReadBps  float64
-	WriteBps float64
-}
-
-type netStats struct {
-	OK      bool
-	Devices []netDeviceStats
-	Rates   []netDeviceRates
-}
-
-type netDeviceStats struct {
-	Name        string
-	BytesSent   uint64
-	BytesRecv   uint64
-	PacketsSent uint64
-	PacketsRecv uint64
-}
-
-type netDeviceRates struct {
-	Name         string
-	BytesSentBps float64
-	BytesRecvBps float64
-}
-
-type gpuStats struct {
-	Index       string
-	UUID        string
-	Name        string
-	UtilPercent optFloat
-	MemoryUsed  optFloat
-	MemoryTotal optFloat
-	Temperature optFloat
-	PowerDraw   optFloat
-	PowerLimit  optFloat
-	FanPercent  optFloat
-	Processes   []gpuProcess
-	UtilTrend   string
-	UtilDelta   float64
-	VRAMTrend   string
-	VRAMDelta   float64
-}
-
-type gpuProcess struct {
-	GPUUUID      string
-	PID          int32
-	Provider     string
-	Name         string
-	UsedMemoryMB optFloat
-}
-
-type amdGPUStats struct {
-	Index       string
-	PCI         string
-	Name        string
-	UtilPercent optFloat
-	MemoryUsed  optFloat
-	MemoryTotal optFloat
-	Temperature optFloat
-	PowerDraw   optFloat
-	FanPercent  optFloat
-	Processes   []amdGPUProcess
-	UtilTrend   string
-	UtilDelta   float64
-}
-
-type amdGPUProcess struct {
-	PID      int32
-	Provider string
-	Name     string
-	VRAMMiB  optFloat
-	GTTMiB   optFloat
-}
-
-type ollamaProcess struct {
-	PID           int32
-	Name          string
-	Command       string
-	CPUPercent    float64
-	MemoryPercent float64
-	RSS           uint64
-	Runtime       time.Duration
-	RuntimeOK     bool
-}
-
-type commandOutput struct {
-	Output  string
-	Error   string
-	Missing bool
-	Models  []ollamaModel
-}
-
-type ollamaModel struct {
-	Name         string
-	ID           string
-	Size         string
-	Processor    string
-	Context      string
-	Until        string
-	PromptTokens int
-	CtxTokens    int
-}
-
-type unslothStudioStats struct {
-	Connected           bool
-	ActiveModel         string
-	ModelIdentifier     string
-	GGUFVariant         string
-	IsVision            bool
-	IsAudio             bool
-	SupportsReasoning   bool
-	LoadedModels        []string
-	LoadingModels       []string
-	ContextLength       int
-	MaxContextLength    int
-	NativeContextLength int
-	CurrentContext      int
-	ConcurrentSessions  int
-	TokensPerSecond     optFloat
-	SpeculativeType     string
-	TensorParallel      bool
-	TrainStatus         string
-	TrainStep           int
-	TrainLoss           float64
-	TrainLr             float64
-	LoadPhase           string
-	LoadBytes           int64
-	LoadTotal           int64
-	Error               string
-}
 
 // classifyProvider maps a process name and optional cmdline to a specific
 // provider label. Returns "" for unrecognized names (rendered as "other").
@@ -1505,7 +1291,7 @@ func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudio
 	} else {
 		defer statusResp.Body.Close()
 		if statusResp.StatusCode == http.StatusOK {
-			stats.parseInferenceStatus(statusResp.Body)
+			stats.ParseInferenceStatus(statusResp.Body)
 		} else {
 			stats.Error = fmt.Sprintf("inference status %d", statusResp.StatusCode)
 		}
@@ -1519,7 +1305,7 @@ func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudio
 	} else {
 		defer trainResp.Body.Close()
 		if trainResp.StatusCode == http.StatusOK {
-			stats.parseTrainStatus(trainResp.Body)
+			stats.ParseTrainStatus(trainResp.Body)
 		}
 	}
 
@@ -1531,7 +1317,7 @@ func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudio
 	} else {
 		defer loadResp.Body.Close()
 		if loadResp.StatusCode == http.StatusOK {
-			stats.parseLoadProgress(loadResp.Body)
+			stats.ParseLoadProgress(loadResp.Body)
 		}
 	}
 
@@ -1597,134 +1383,6 @@ func studioHealthOK(ctx context.Context, base string) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
-}
-
-func (s *unslothStudioStats) parseInferenceStatus(body io.Reader) {
-	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(body).Decode(&raw); err != nil {
-		return
-	}
-
-	var str string
-	var b bool
-	var num float64
-	var arr []string
-
-	if v, ok := raw["active_model"]; ok && json.Unmarshal(v, &str) == nil {
-		s.ActiveModel = str
-	}
-	if v, ok := raw["model_identifier"]; ok && json.Unmarshal(v, &str) == nil {
-		s.ModelIdentifier = str
-	}
-	if v, ok := raw["gguf_variant"]; ok && json.Unmarshal(v, &str) == nil {
-		s.GGUFVariant = str
-	}
-	if v, ok := raw["is_vision"]; ok && json.Unmarshal(v, &b) == nil {
-		s.IsVision = b
-	}
-	if v, ok := raw["is_audio"]; ok && json.Unmarshal(v, &b) == nil {
-		s.IsAudio = b
-	}
-	if v, ok := raw["supports_reasoning"]; ok && json.Unmarshal(v, &b) == nil {
-		s.SupportsReasoning = b
-	}
-	if v, ok := raw["loaded"]; ok && json.Unmarshal(v, &arr) == nil {
-		s.LoadedModels = arr
-	}
-	if v, ok := raw["loading"]; ok && json.Unmarshal(v, &arr) == nil {
-		s.LoadingModels = arr
-	}
-	if v, ok := raw["context_length"]; ok && json.Unmarshal(v, &num) == nil {
-		s.ContextLength = int(num)
-	}
-	if v, ok := raw["max_context_length"]; ok && json.Unmarshal(v, &num) == nil {
-		s.MaxContextLength = int(num)
-	}
-	if v, ok := raw["native_context_length"]; ok && json.Unmarshal(v, &num) == nil {
-		s.NativeContextLength = int(num)
-	}
-	if num, ok := findJSONNumber(raw, "current_context", "current_context_length", "context_used", "context_tokens"); ok {
-		s.CurrentContext = int(num)
-	}
-	if num, ok := findJSONNumber(raw, "concurrent_sessions", "active_sessions", "active_requests", "num_active_requests", "parallel_sessions", "parallel_requests"); ok {
-		s.ConcurrentSessions = int(num)
-	}
-	if num, ok := findJSONNumber(raw, "tokens_per_second", "tokens_sec", "throughput", "generation_tokens_per_second"); ok {
-		s.TokensPerSecond = optFloat{Value: num, OK: true}
-	}
-	if v, ok := raw["speculative_type"]; ok && json.Unmarshal(v, &str) == nil {
-		s.SpeculativeType = str
-	}
-	if v, ok := raw["tensor_parallel"]; ok && json.Unmarshal(v, &b) == nil {
-		s.TensorParallel = b
-	}
-}
-
-func findJSONNumber(raw map[string]json.RawMessage, keys ...string) (float64, bool) {
-	for _, key := range keys {
-		if value, ok := raw[key]; ok {
-			var number float64
-			if json.Unmarshal(value, &number) == nil {
-				return number, true
-			}
-		}
-	}
-	for _, containerKey := range []string{"metrics", "stats", "inference"} {
-		value, ok := raw[containerKey]
-		if !ok {
-			continue
-		}
-		var nested map[string]json.RawMessage
-		if json.Unmarshal(value, &nested) == nil {
-			if number, ok := findJSONNumber(nested, keys...); ok {
-				return number, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func (s *unslothStudioStats) parseTrainStatus(body io.Reader) {
-	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(body).Decode(&raw); err != nil {
-		return
-	}
-
-	var str string
-	var num float64
-
-	if v, ok := raw["status"]; ok && json.Unmarshal(v, &str) == nil {
-		s.TrainStatus = str
-	}
-	if v, ok := raw["current_step"]; ok && json.Unmarshal(v, &num) == nil {
-		s.TrainStep = int(num)
-	}
-	if v, ok := raw["current_loss"]; ok && json.Unmarshal(v, &num) == nil {
-		s.TrainLoss = num
-	}
-	if v, ok := raw["current_lr"]; ok && json.Unmarshal(v, &num) == nil {
-		s.TrainLr = num
-	}
-}
-
-func (s *unslothStudioStats) parseLoadProgress(body io.Reader) {
-	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(body).Decode(&raw); err != nil {
-		return
-	}
-
-	var str string
-	var num float64
-
-	if v, ok := raw["phase"]; ok && json.Unmarshal(v, &str) == nil {
-		s.LoadPhase = str
-	}
-	if v, ok := raw["bytes_loaded"]; ok && json.Unmarshal(v, &num) == nil {
-		s.LoadBytes = int64(num)
-	}
-	if v, ok := raw["bytes_total"]; ok && json.Unmarshal(v, &num) == nil {
-		s.LoadTotal = int64(num)
-	}
 }
 
 func studioHTTPGet(ctx context.Context, url string, token string) (*http.Response, error) {
