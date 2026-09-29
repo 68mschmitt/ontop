@@ -57,6 +57,8 @@ type snapshot struct {
 	OllamaPS         commandOutput
 	UnslothStudio    unslothStudioStats
 	GPUSparkline     map[string][]float64
+	CPUHistory       []float64
+	RAMHistory       []float64
 	Warnings         []string
 	CollectionMillis int64
 }
@@ -235,6 +237,9 @@ type unslothStudioStats struct {
 // classifyProvider maps a process name and optional cmdline to a specific
 // provider label. Returns "" for unrecognized names (rendered as "other").
 var prevSnapshot snapshot
+var CurrentTheme Theme = themes["dark"]
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func classifyProvider(name string, cmdline string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
@@ -309,6 +314,11 @@ type model struct {
 	showHelp         bool
 	disabledSections map[string]bool
 	cfg              config
+	spinnerIndex     int
+	flashActive      bool
+	flashEnd         int64
+	notification     string
+	notificationEnd  int64
 }
 
 var (
@@ -319,10 +329,10 @@ var (
 	panelColor  = lipgloss.Color("#323846")
 	textColor   = lipgloss.Color("#F3F5F7")
 
-	headerStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(panelColor)
+	headerStyleTemplate = lipgloss.NewStyle().
+				Padding(0, 1).
+				Border(lipgloss.NormalBorder(), false, false, true, false).
+				BorderForeground(panelColor)
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	mutedStyle = lipgloss.NewStyle().Foreground(mutedColor)
 	valueStyle = lipgloss.NewStyle().Bold(true).Foreground(textColor)
@@ -348,12 +358,38 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	exportTarget := flag.String("export", "", "export target: stdout, json, csv, or file path")
 	onceMode := flag.Bool("once", false, "single snapshot and exit")
+	themeFlag := flag.String("theme", "", "theme to use (dark, midnight, monokai)")
+	listThemesFlag := flag.Bool("list-themes", false, "list available themes")
 	flag.IntVar(&studioPort, "unsloth-port", 8888, "Unsloth Studio API port")
 	flag.StringVar(&studioToken, "unsloth-token", "", "Unsloth Studio API Bearer token (or set UNSLOTH_STUDIO_TOKEN)")
 	flag.Parse()
+
+	if *listThemesFlag {
+		avail := listThemes()
+		fmt.Println("Available themes:", strings.Join(avail, ", "))
+		return
+	}
+
 	if *showVersion {
 		fmt.Println("ontop " + version)
 		return
+	}
+
+	if *themeFlag != "" {
+		if t, ok := themes[*themeFlag]; ok {
+			applyTheme(t)
+			CurrentTheme = t
+		} else {
+			fmt.Fprintf(os.Stderr, "unknown theme: %s (available: %v)\n", *themeFlag, listThemes())
+			os.Exit(1)
+		}
+	}
+
+	if envTheme := os.Getenv("ONTOP_THEME"); envTheme != "" {
+		if t, ok := themes[envTheme]; ok {
+			applyTheme(t)
+			CurrentTheme = t
+		}
 	}
 
 	// Support env var override for Unsloth Studio URL before import.
@@ -491,22 +527,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.disabledSections == nil {
 					m.disabledSections = make(map[string]bool)
 				}
-				m.disabledSections["GPU"] = !m.disabledSections["GPU"]
+				enabled := !m.disabledSections["GPU"]
+				m.disabledSections["GPU"] = enabled
+				m.notification = fmt.Sprintf("GPU section %s", mapBoolString(enabled))
+				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 's':
 				if m.disabledSections == nil {
 					m.disabledSections = make(map[string]bool)
 				}
-				m.disabledSections["System"] = !m.disabledSections["System"]
+				enabled := !m.disabledSections["System"]
+				m.disabledSections["System"] = enabled
+				m.notification = fmt.Sprintf("System section %s", mapBoolString(enabled))
+				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'u':
 				if m.disabledSections == nil {
 					m.disabledSections = make(map[string]bool)
 				}
-				m.disabledSections["Unsloth"] = !m.disabledSections["Unsloth"]
+				enabled := !m.disabledSections["Unsloth"]
+				m.disabledSections["Unsloth"] = enabled
+				m.notification = fmt.Sprintf("Unsloth section %s", mapBoolString(enabled))
+				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'o':
 				if m.disabledSections == nil {
 					m.disabledSections = make(map[string]bool)
 				}
-				m.disabledSections["Ollama"] = !m.disabledSections["Ollama"]
+				enabled := !m.disabledSections["Ollama"]
+				m.disabledSections["Ollama"] = enabled
+				m.notification = fmt.Sprintf("Ollama section %s", mapBoolString(enabled))
+				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case '?', 'h':
 				m.showHelp = !m.showHelp
 			}
@@ -515,12 +563,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
+		m.flashActive = true
+		m.flashEnd = time.Now().Add(300 * time.Millisecond).UnixNano()
 		m.updateViewport()
 	case metricsMsg:
 		m.snapshot = msg.Snapshot
 		m.loading = false
 		m.updateViewport()
 	case tickMsg:
+		m.spinnerIndex = (m.spinnerIndex + 1) % len(spinnerFrames)
+		if time.Now().UnixNano() >= m.notificationEnd {
+			m.notification = ""
+		}
 		cmds = append(cmds, tickCmd(m.interval))
 		if !m.loading {
 			m.loading = true
@@ -549,12 +603,33 @@ func (m model) View() string {
 		return renderHelpOverlay(width, m.disabledSections)
 	}
 
-	header := renderHeader(m.snapshot, m.interval, m.loading, width)
+	flash := m.flashActive
+	if flash && time.Now().UnixNano() >= m.flashEnd {
+		m.flashActive = false
+		flash = false
+	}
+
+	frame := ""
+	if m.loading {
+		frame = spinnerFrames[m.spinnerIndex]
+	}
+	header := renderHeader(m.snapshot, m.interval, m.loading, flash, frame, m.width)
 	footer := renderFooter(width, m.disabledSections)
 	vp := m.viewport
 	vp.Height = maxInt(1, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-1)
 
-	return header + "\n" + vp.View() + "\n" + footer
+	var notif string
+	if m.notification != "" && time.Now().UnixNano() < m.notificationEnd {
+		notif = "\n" + lipgloss.NewStyle().Foreground(accentColor).Render(m.notification)
+	} else if m.notification != "" {
+		m.notification = ""
+	}
+
+	content := header + "\n" + vp.View() + "\n" + footer
+	if notif != "" {
+		content = content + "\n" + notif
+	}
+	return content
 }
 
 func (m *model) updateViewport() {
@@ -595,6 +670,43 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings, prevSnapshot.GPUs)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings, prevSnapshot.AMDGPUs)
 	s.GPUSparkline = mergeGPUSparkline(prevSnapshot.GPUSparkline, s.GPUs)
+
+	var historyCPU []float64
+	if len(prevSnapshot.CPUHistory) > 0 {
+		historyCPU = make([]float64, len(prevSnapshot.CPUHistory))
+		copy(historyCPU, prevSnapshot.CPUHistory)
+	}
+	if s.CPU.OK && len(s.CPU.PerCore) > 0 {
+		total := s.CPU.Total
+		history := historyCPU
+		if len(history) == 0 {
+			history = append(history, 0)
+		}
+		history = append(history, total)
+		if len(history) > 30 {
+			history = history[1:]
+		}
+		s.CPUHistory = history
+	}
+
+	var historyRAM []float64
+	if len(prevSnapshot.RAMHistory) > 0 {
+		historyRAM = make([]float64, len(prevSnapshot.RAMHistory))
+		copy(historyRAM, prevSnapshot.RAMHistory)
+	}
+	if s.Memory.OK {
+		percent := s.Memory.Percent
+		history := historyRAM
+		if len(history) == 0 {
+			history = append(history, 0)
+		}
+		history = append(history, percent)
+		if len(history) > 30 {
+			history = history[1:]
+		}
+		s.RAMHistory = history
+	}
+
 	s.Inference = collectInference(ctx, s.GPUs, s.AMDGPUs, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
@@ -1574,15 +1686,17 @@ func parseOptFloat(raw string) optFloat {
 	return optFloat{Value: parsed, OK: true}
 }
 
-func renderHeader(s snapshot, interval time.Duration, loading bool, width int) string {
+func renderHeader(s snapshot, interval time.Duration, loading bool, flashActive bool, currentFrame string, width int) string {
 	updated := "waiting for first sample"
 	if !s.CollectedAt.IsZero() {
 		updated = "updated " + s.CollectedAt.Format("15:04:05")
 	}
 
-	statusStr := "loading..."
-	if !loading {
-		statusStr = "idle"
+	var statusStr string
+	if loading {
+		statusStr = lipgloss.NewStyle().Foreground(accentColor).Render(currentFrame + " collecting")
+	} else {
+		statusStr = lipgloss.NewStyle().Foreground(accentColor).Render("idle")
 	}
 
 	meta := fmt.Sprintf("%s | interval %s | %s", updated, trimDuration(interval), statusStr)
@@ -1596,7 +1710,16 @@ func renderHeader(s snapshot, interval time.Duration, loading bool, width int) s
 		mutedStyle.Render(meta),
 	)
 
-	return headerStyle.Width(maxInt(20, width-2)).Render(header)
+	borderCol := panelColor
+	if flashActive {
+		borderCol = accentColor
+	}
+
+	style := lipgloss.NewStyle().
+		Padding(0, 1).
+		Border(lipgloss.NormalBorder(), false, false, true, false).
+		BorderForeground(borderCol)
+	return style.Width(maxInt(20, width-2)).Render(header)
 }
 
 func renderFooter(width int, disabledSections map[string]bool) string {
@@ -1730,8 +1853,8 @@ func renderSystem(s snapshot, width int, disabledSections map[string]bool) strin
 	if disabledSections != nil && disabledSections["System"] {
 		return ""
 	}
-	cpuBody := renderCPU(s.CPU, width)
-	ramBody := renderMemory(s.Memory, width)
+	cpuBody := renderCPU(s.CPU, s.CPUHistory, width)
+	ramBody := renderMemory(s.Memory, s.RAMHistory, width)
 
 	var body string
 	innerWidth := maxInt(20, width-6)
@@ -1760,7 +1883,7 @@ func renderSystem(s snapshot, width int, disabledSections map[string]bool) strin
 	return renderGroup("System", body, width)
 }
 
-func renderCPU(stats cpuStats, width int) string {
+func renderCPU(stats cpuStats, history []float64, width int) string {
 	if !stats.OK {
 		return mutedStyle.Render("CPU metrics unavailable.")
 	}
@@ -1771,22 +1894,38 @@ func renderCPU(stats cpuStats, width int) string {
 	}
 
 	if len(stats.PerCore) == 0 {
+		if len(history) > 0 {
+			spark := renderSparkline(history, minInt(len(history), innerWidth-10))
+			lines = append(lines, mutedStyle.Render("trend: "+spark))
+		}
 		return strings.Join(lines, "\n")
 	}
 
 	lines = append(lines, renderCoreRow(stats.PerCore, innerWidth))
 
+	if len(history) > 0 {
+		spark := renderSparkline(history, minInt(len(history), innerWidth-10))
+		lines = append(lines, mutedStyle.Render("trend: "+spark))
+	}
+
 	return strings.Join(lines, "\n")
 }
 
-func renderMemory(stats memoryStats, width int) string {
+func renderMemory(stats memoryStats, history []float64, width int) string {
 	if !stats.OK {
 		return mutedStyle.Render("RAM metrics unavailable.")
 	}
 
 	innerWidth := maxInt(20, width-6)
 	used := fmt.Sprintf("%s / %s (available %s)", humanBytes(stats.Used), humanBytes(stats.Total), humanBytes(stats.Available))
-	return metricLine("RAM", stats.Percent, fmt.Sprintf("%.1f%%  %s", stats.Percent, used), innerWidth)
+	lines := []string{metricLine("RAM", stats.Percent, fmt.Sprintf("%.1f%%  %s", stats.Percent, used), innerWidth)}
+
+	if len(history) > 0 {
+		spark := renderSparkline(history, minInt(len(history), 20))
+		lines = append(lines, mutedStyle.Render("trend: "+spark))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func renderSwap(stats swapMemoryStats, width int) string {
@@ -2758,6 +2897,13 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func mapBoolString(b bool) string {
+	if b {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func addGPUUtilDelta(prev []gpuStats, new []gpuStats) {

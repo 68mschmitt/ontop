@@ -301,7 +301,7 @@ func BenchmarkRenderCPU(b *testing.B) {
 		PerCore: []float64{35.1, 50.2, 44.5, 60.3, 25.7, 70.1},
 	}
 	for i := 0; i < b.N; i++ {
-		renderCPU(stats, 160)
+		renderCPU(stats, nil, 160)
 	}
 }
 
@@ -314,7 +314,7 @@ func BenchmarkRenderMemory(b *testing.B) {
 		Percent:   37.5,
 	}
 	for i := 0; i < b.N; i++ {
-		renderMemory(stats, 120)
+		renderMemory(stats, nil, 120)
 	}
 }
 
