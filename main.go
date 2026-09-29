@@ -2583,6 +2583,10 @@ func renderUnslothStudio(s unslothStudioStats, width int, disabledSections map[s
 		lines = append(lines, warnStyle.Render("! ")+fitText(s.Error, innerWidth-4))
 	}
 
+	if s.ActiveModel == "" && len(s.LoadingModels) == 0 && s.LoadPhase == "" && s.TrainStatus == "" && s.Error == "" {
+		return ""
+	}
+
 	return renderCard("Unsloth Studio", strings.Join(lines, "\n"), width)
 }
 
