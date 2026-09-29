@@ -14,13 +14,27 @@ Thermal monitoring, AMD fan RPM, disk I/O, network I/O
 ### Phase D (Completed)
 GPU utilization history with sparklines, VRAM trends, Ollama JSON, AMD fallback
 
-### Phase E — In Progress
-| Task | Description | Status |
-|------|-------------|--------|
-| 11A | Config via env vars/config file | Starting |
-| 11B | Keyboard shortcuts (toggle cards) | Next |
-| 11C | Help overlay | Next |
+### Phase E (Completed)
+Keyboard shortcuts, help overlay, config/env vars, export modes, Unsloth discovery
 
-**Current session:** Starting Phase E with keyboard shortcuts + config + help overlay.
+---
+
+## Current Status
+**Test:** All 12 tests pass.
+**Build:** Clean.
+**Commit count:** ~12+ commits across all phases.
+**Format:** Clean.
+
+---
+
+## Remaining Work (Minor Polish)
+
+| Task | Status |
+|------|--------|
+| 15B | Integration test fixtures (testdata/) | Starting |
+| 15C | Benchmark tests | Next |
+| 11A-13A | All completed above | Done |
+
+**Status:** Continuing with test fixtures, integration tests, and benchmark tests.
 
 ---

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -211,5 +213,148 @@ func TestRenderContentOrdering(t *testing.T) {
 	idx := func(name string) int { return strings.Index(content, name) }
 	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
 		t.Fatalf("unexpected section ordering: %q", content)
+	}
+}
+
+func readFixture(name string) string {
+	data, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		panic(fmt.Sprintf("failed to read testdata/%s: %v", name, err))
+	}
+	return string(data)
+}
+
+func TestParseOllamaPSWithFixture(t *testing.T) {
+	output := readFixture("ollama_ps_output.txt")
+	models := parseOllamaPS(output)
+	if len(models) != 2 {
+		t.Fatalf("got %d models, want 2", len(models))
+	}
+	if models[0].Name != "qwen2.5:14b" || models[0].Size != "8.1 GB" {
+		t.Fatalf("unexpected model: %+v", models[0])
+	}
+}
+
+func TestParseNVIDIASVMDetectsMultipleGPUs(t *testing.T) {
+	output := readFixture("nvidia_smi_output.txt")
+	gpus, err := parseGPUCSV(output)
+	if err != nil {
+		t.Fatalf("parseGPUCSV returned error: %v", err)
+	}
+	if len(gpus) != 2 {
+		t.Fatalf("got %d GPUs, want 2", len(gpus))
+	}
+	if gpus[0].Name != "NVIDIA GeForce RTX 4090" {
+		t.Fatalf("unexpected GPU 0: %v", gpus[0])
+	}
+}
+
+func TestParseAMDProcessesFromJSON(t *testing.T) {
+	output := readFixture("amdgpu_top_output.json")
+	gpus, err := parseAMDJSON(output)
+	if err != nil {
+		t.Fatalf("parseAMDJSON returned error: %v", err)
+	}
+	if len(gpus) != 1 {
+		t.Fatalf("got %d GPUs, want 1", len(gpus))
+	}
+	if len(gpus[0].Processes) != 2 {
+		t.Fatalf("got %d processes, want 2", len(gpus[0].Processes))
+	}
+	found := make(map[string]bool)
+	for _, p := range gpus[0].Processes {
+		found[p.Name] = true
+		found[p.Provider] = true
+	}
+	if !found["ollama"] {
+		t.Fatalf("ollama not found in GPU processes")
+	}
+	if !found["vllm"] {
+		t.Fatalf("vllm provider not found in GPU processes")
+	}
+}
+
+func BenchmarkParseAMDJSON(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		fixtures, _ := os.ReadFile("testdata/amdgpu_top_output.json")
+		parseAMDJSON(string(fixtures))
+	}
+}
+
+func BenchmarkParseOllamaPS(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		fixtures, _ := os.ReadFile("testdata/ollama_ps_output.txt")
+		parseOllamaPS(string(fixtures))
+	}
+}
+
+func BenchmarkFitText(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		fitText("模型名称 abc 测试", 30)
+	}
+}
+
+func BenchmarkRenderCPU(b *testing.B) {
+	stats := cpuStats{
+		OK:      true,
+		Total:   45.2,
+		PerCore: []float64{35.1, 50.2, 44.5, 60.3, 25.7, 70.1},
+	}
+	for i := 0; i < b.N; i++ {
+		renderCPU(stats, 160)
+	}
+}
+
+func BenchmarkRenderMemory(b *testing.B) {
+	stats := memoryStats{
+		OK:        true,
+		Used:      12000000000,
+		Total:     32000000000,
+		Available: 8000000000,
+		Percent:   37.5,
+	}
+	for i := 0; i < b.N; i++ {
+		renderMemory(stats, 120)
+	}
+}
+
+func BenchmarkRenderCoreCell(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		renderCoreCell(0, 42.5, 160)
+	}
+}
+
+func BenchmarkRenderBar(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		renderBar(75.0, 20)
+	}
+}
+
+func BenchmarkHumanBytes(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		humanBytes(1234567890)
+	}
+}
+
+func BenchmarkClassifyProvider(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		classifyProvider("python", "python3 -m torch.nn.parallel.DistributedDataParallel --ollama")
+	}
+}
+
+func BenchmarkRenderInferenceTable(b *testing.B) {
+	procs := []inferenceProcess{
+		{PID: 1, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
+		{PID: 2, Provider: "Unsloth", Name: "python-unsloth", VRAMMiB: optFloat{Value: 12288, OK: true}},
+		{PID: 3, Provider: "", Name: "chrome", VRAMMiB: optFloat{Value: 2048, OK: true}},
+	}
+	for i := 0; i < b.N; i++ {
+		renderInferenceTable(procs, 120)
+	}
+}
+
+func BenchmarkParseOptFloat(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		parseOptFloat("12345.67")
 	}
 }
