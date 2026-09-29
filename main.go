@@ -313,7 +313,7 @@ type model struct {
 
 var (
 	accentColor = lipgloss.Color("#7DFFB3")
-	mutedColor  = lipgloss.Color("#6F7785")
+	mutedColor  = lipgloss.Color("#88909C")
 	warnColor   = lipgloss.Color("#FFD166")
 	dangerColor = lipgloss.Color("#FF6B6B")
 	panelColor  = lipgloss.Color("#323846")
@@ -331,13 +331,16 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(panelColor).
 			Padding(0, 1)
-	sectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	labelStyle        = lipgloss.NewStyle().Foreground(mutedColor)
-	footerStyle       = lipgloss.NewStyle().Foreground(mutedColor).Padding(0, 1)
-	barOKStyle        = lipgloss.NewStyle().Foreground(accentColor)
-	barWarnStyle      = lipgloss.NewStyle().Foreground(warnColor)
-	barDangerStyle    = lipgloss.NewStyle().Foreground(dangerColor)
-	barEmptyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A3F4B"))
+	sectionTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	labelStyle          = lipgloss.NewStyle().Foreground(mutedColor)
+	footerStyle         = lipgloss.NewStyle().Foreground(mutedColor).Padding(0, 1)
+	barOKStyle          = lipgloss.NewStyle().Foreground(accentColor)
+	barWarnStyle        = lipgloss.NewStyle().Foreground(warnColor)
+	barDangerStyle      = lipgloss.NewStyle().Foreground(dangerColor)
+	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A3F4B"))
+	sevOKStyle          = lipgloss.NewStyle().Foreground(accentColor)
+	sevWarnColorStyle   = lipgloss.NewStyle().Foreground(warnColor)
+	sevDangerColorStyle = lipgloss.NewStyle().Foreground(dangerColor)
 )
 
 func main() {
@@ -477,6 +480,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, keys.Refresh):
 			if !m.loading {
+				m.viewport.GotoTop()
 				m.loading = true
 				cmds = append(cmds, collectMetricsCmd())
 			}
@@ -1598,9 +1602,9 @@ func renderHeader(s snapshot, interval time.Duration, loading bool, width int) s
 func renderFooter(width int, disabledSections map[string]bool) string {
 	var toggles []string
 	sections := []struct {
-		key       string
-		name      string
-		active    bool
+		key    string
+		name   string
+		active bool
 	}{
 		{"s", "System", !isEnabled(disabledSections, "System")},
 		{"g", "GPU", !isEnabled(disabledSections, "GPU")},
@@ -1729,14 +1733,31 @@ func renderSystem(s snapshot, width int, disabledSections map[string]bool) strin
 	cpuBody := renderCPU(s.CPU, width)
 	ramBody := renderMemory(s.Memory, width)
 
-	body := sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("RAM") + "\n" + ramBody
-	if s.Swap.OK {
-		body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
+	var body string
+	innerWidth := maxInt(20, width-6)
+	if innerWidth >= 50 {
+		cpuCol := lipgloss.NewStyle().Width(innerWidth / 2).Render(sectionTitleStyle.Render("CPU") + "\n" + cpuBody)
+		ramCol := lipgloss.NewStyle().Width(innerWidth / 2).Render(sectionTitleStyle.Render("RAM") + "\n" + ramBody)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, cpuCol, ramCol)
+		if s.Swap.OK {
+			body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
+		}
+		if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
+			if body != "" {
+				body += "\n\n"
+			}
+			body += sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
+		}
+	} else {
+		body = sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("RAM") + "\n" + ramBody
+		if s.Swap.OK {
+			body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
+		}
+		if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
+			body += "\n\n" + sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
+		}
 	}
-	if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
-		body += "\n\n" + sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
-	}
-	return renderCard("System", body, width)
+	return renderGroup("System", body, width)
 }
 
 func renderCPU(stats cpuStats, width int) string {
@@ -1974,7 +1995,12 @@ func renderInferenceTable(processes []inferenceProcess, width int) string {
 			if name == "" {
 				name = "unknown"
 			}
-			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+			vramStr := optMemoryString(p.VRAMMiB)
+			var percent float64
+			if p.VRAMMiB.OK {
+				percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), fitText(name, processWidth)))
 		}
 		return strings.Join(lines, "\n")
 	}
@@ -1986,7 +2012,12 @@ func renderInferenceTable(processes []inferenceProcess, width int) string {
 		if name == "" {
 			name = "unknown"
 		}
-		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, labelStyle.Render(p.Provider), optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+		vramStr := optMemoryString(p.VRAMMiB)
+		var percent float64
+		if p.VRAMMiB.OK {
+			percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
+		}
+		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, labelStyle.Render(p.Provider), coloredValue(vramStr, percent), fitText(name, processWidth)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2140,7 +2171,12 @@ func renderGPUProcessTable(processes []gpuProcess, width int) string {
 			if name == "" {
 				name = "unknown"
 			}
-			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.UsedMemoryMB), fitText(name, processWidth)))
+			vramStr := optMemoryString(p.UsedMemoryMB)
+			var percent float64
+			if p.UsedMemoryMB.OK {
+				percent = inferVRAMPercent(p.UsedMemoryMB.Value, p.UsedMemoryMB.OK)
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), fitText(name, processWidth)))
 		}
 		return strings.Join(lines, "\n")
 	}
@@ -2152,7 +2188,12 @@ func renderGPUProcessTable(processes []gpuProcess, width int) string {
 		if name == "" {
 			name = "unknown"
 		}
-		line := fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.UsedMemoryMB), fitText(name, processWidth))
+		vramStr := optMemoryString(p.UsedMemoryMB)
+		var percent float64
+		if p.UsedMemoryMB.OK {
+			percent = inferVRAMPercent(p.UsedMemoryMB.Value, p.UsedMemoryMB.OK)
+		}
+		line := fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), fitText(name, processWidth))
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
@@ -2167,7 +2208,12 @@ func renderAMDProcessTable(processes []amdGPUProcess, width int) string {
 			if name == "" {
 				name = "unknown"
 			}
-			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+			vramStr := optMemoryString(p.VRAMMiB)
+			var percent float64
+			if p.VRAMMiB.OK {
+				percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), fitText(name, processWidth)))
 		}
 		return strings.Join(lines, "\n")
 	}
@@ -2179,7 +2225,16 @@ func renderAMDProcessTable(processes []amdGPUProcess, width int) string {
 		if name == "" {
 			name = "unknown"
 		}
-		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, optMemoryString(p.VRAMMiB), optMemoryString(p.GTTMiB), fitText(name, processWidth)))
+		vramStr := optMemoryString(p.VRAMMiB)
+		gttStr := optMemoryString(p.GTTMiB)
+		var vramPercent, gttPercent float64
+		if p.VRAMMiB.OK {
+			vramPercent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
+		}
+		if p.GTTMiB.OK {
+			gttPercent = inferVRAMPercent(p.GTTMiB.Value, p.GTTMiB.OK)
+		}
+		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, coloredValue(vramStr, vramPercent), coloredValue(gttStr, gttPercent), fitText(name, processWidth)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2406,6 +2461,13 @@ func formatTokenCount(n int) string {
 	}
 }
 
+func renderGroup(title, body string, width int) string {
+	innerWidth := maxInt(20, width-4)
+	header := sectionTitleStyle.Render(" ━ " + title + " ━ ")
+	s := cardStyle.Width(innerWidth)
+	return s.Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
+}
+
 func renderCard(title, body string, width int) string {
 	innerWidth := maxInt(20, width-4)
 	content := sectionTitleStyle.Render(title)
@@ -2619,6 +2681,36 @@ func addWarning(warnings *[]string, message string) {
 		return
 	}
 	*warnings = append(*warnings, message)
+}
+
+func severityStyle(percent float64) lipgloss.Style {
+	switch {
+	case percent >= 90:
+		return sevDangerColorStyle
+	case percent >= 75:
+		return sevWarnColorStyle
+	case percent >= 50:
+		return sevOKStyle
+	default:
+		return lipgloss.NewStyle().Foreground(mutedColor)
+	}
+}
+
+func coloredValue(text string, percent float64) string {
+	return severityStyle(percent).Render(text)
+}
+
+func inferVRAMPercent(vramMiB float64, _ bool) float64 {
+	if vramMiB >= 50*1024 {
+		return 100
+	}
+	if vramMiB >= 25*1024 {
+		return 75
+	}
+	if vramMiB >= 10*1024 {
+		return 60
+	}
+	return 30
 }
 
 func fitText(text string, width int) string {
