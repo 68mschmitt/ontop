@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/mattn/go-runewidth"
+
+	"ontop/internal/collect"
 )
 
 func TestParseAMDJSON(t *testing.T) {
@@ -62,14 +64,14 @@ func TestParseOllamaPSJSONWithTokens(t *testing.T) {
 }
 
 func TestFitTextUsesDisplayWidth(t *testing.T) {
-	text := fitText("模型名称 abc", 10)
+	text := collect.FitText("模型名称 abc", 10)
 	if width := runewidth.StringWidth(text); width > 10 {
 		t.Fatalf("display width %d exceeds limit: %q", width, text)
 	}
 }
 
 func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
-	row := renderCoreRow([]float64{10, 20, 30, 40, 50, 60}, 20)
+	row := collect.RenderCoreRow([]float64{10, 20, 30, 40, 50, 60}, 20)
 	if strings.Contains(row, "hidden") || !strings.Contains(row, "C0") || !strings.Contains(row, "C5") {
 		t.Fatalf("unexpected core row: %q", row)
 	}
@@ -155,7 +157,7 @@ func TestRenderGPUSectionGrouping(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, nil, 120, nil)
+	content := collect.RenderGPUSection(gpus, nil, 120, nil)
 	if !strings.Contains(content, "NVIDIA GPU") {
 		t.Fatalf("expected NVIDIA card: %q", content)
 	}
@@ -178,7 +180,7 @@ func TestRenderGPUSectionLLMOnly(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, nil, 120, nil)
+	content := collect.RenderGPUSection(gpus, nil, 120, nil)
 	if !strings.Contains(content, "NVIDIA GPU") || !strings.Contains(content, "LLM Processes") {
 		t.Fatalf("expected NVIDIA card with LLM table only: %q", content)
 	}
@@ -290,7 +292,7 @@ func BenchmarkParseOllamaPS(b *testing.B) {
 
 func BenchmarkFitText(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		fitText("模型名称 abc 测试", 30)
+		collect.FitText("模型名称 abc 测试", 30)
 	}
 }
 
@@ -301,7 +303,7 @@ func BenchmarkRenderCPU(b *testing.B) {
 		PerCore: []float64{35.1, 50.2, 44.5, 60.3, 25.7, 70.1},
 	}
 	for i := 0; i < b.N; i++ {
-		renderCPU(stats, nil, 160)
+		collect.RenderCPU(stats, nil, 160)
 	}
 }
 
@@ -314,25 +316,25 @@ func BenchmarkRenderMemory(b *testing.B) {
 		Percent:   37.5,
 	}
 	for i := 0; i < b.N; i++ {
-		renderMemory(stats, nil, 120)
+		collect.RenderMemory(stats, nil, 120)
 	}
 }
 
 func BenchmarkRenderCoreCell(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		renderCoreCell(0, 42.5, 160)
+		collect.RenderCoreCell(0, 42.5, 160)
 	}
 }
 
 func BenchmarkRenderBar(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		renderBar(75.0, 20)
+		collect.RenderBar(75.0, 20)
 	}
 }
 
 func BenchmarkHumanBytes(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		humanBytes(1234567890)
+		collect.HumanBytes(1234567890)
 	}
 }
 

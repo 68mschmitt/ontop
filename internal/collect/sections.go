@@ -1,8 +1,6 @@
-package main
+package collect
 
-import (
-	"strings"
-)
+import "strings"
 
 type section interface {
 	Name() string
@@ -10,7 +8,7 @@ type section interface {
 	Enabled() bool
 }
 
-func makeSections(s snapshot, disabled map[string]bool) []section {
+func makeSections(s Snapshot, disabled map[string]bool) []section {
 	return []section{
 		&ollamaModelSection{snapshot: s, disabled: disabled},
 		&gpuSection{snapshot: s, disabled: disabled},
@@ -24,15 +22,15 @@ func makeSections(s snapshot, disabled map[string]bool) []section {
 	}
 }
 
-func renderContentSections(s snapshot, width int, disabledSections map[string]bool) string {
+func RenderContentSections(s Snapshot, width int, disabledSections map[string]bool) string {
 	if s.CollectedAt.IsZero() {
-		return renderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
+		return RenderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
 	}
 
 	var parts []string
 	var notices string
 	if len(s.Warnings) > 0 {
-		if w := renderWarnings(s.Warnings, width); w != "" {
+		if w := RenderWarnings(s.Warnings, width); w != "" {
 			notices = w
 		}
 	}
@@ -52,92 +50,92 @@ func renderContentSections(s snapshot, width int, disabledSections map[string]bo
 }
 
 type systemSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *systemSection) Name() string        { return "System" }
 func (s *systemSection) Enabled() bool       { return !(s.disabled != nil && s.disabled["System"]) }
-func (s *systemSection) Render(w int) string { return renderSystem(s.snapshot, w, s.disabled) }
+func (s *systemSection) Render(w int) string { return RenderSystem(s.snapshot, w, s.disabled) }
 
 type gpuSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *gpuSection) Name() string  { return "NVIDIA GPU" }
 func (s *gpuSection) Enabled() bool { return !(s.disabled != nil && s.disabled["GPU"]) }
 func (s *gpuSection) Render(w int) string {
-	return renderGPUSection(s.snapshot.GPUs, s.snapshot.GPUSparkline, w, s.disabled)
+	return RenderGPUSection(s.snapshot.GPUs, s.snapshot.GPUSparkline, w, s.disabled)
 }
 
 type amdSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *amdSection) Name() string        { return "AMD GPU" }
 func (s *amdSection) Enabled() bool       { return !(s.disabled != nil && s.disabled["GPU"]) }
-func (s *amdSection) Render(w int) string { return renderAMDSection(s.snapshot.AMDGPUs, w, s.disabled) }
+func (s *amdSection) Render(w int) string { return RenderAMDSection(s.snapshot.AMDGPUs, w, s.disabled) }
 
 type diskSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *diskSection) Name() string        { return "Disk I/O" }
 func (s *diskSection) Enabled() bool       { return !(s.disabled != nil && s.disabled["Disk"]) }
-func (s *diskSection) Render(w int) string { return renderDiskCard(s.snapshot.Disk, w, s.disabled) }
+func (s *diskSection) Render(w int) string { return RenderDiskCard(s.snapshot.Disk, w, s.disabled) }
 
 type netSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *netSection) Name() string        { return "Network I/O" }
 func (s *netSection) Enabled() bool       { return !(s.disabled != nil && s.disabled["Network"]) }
-func (s *netSection) Render(w int) string { return renderNetCard(s.snapshot.Net, w, s.disabled) }
+func (s *netSection) Render(w int) string { return RenderNetCard(s.snapshot.Net, w, s.disabled) }
 
 type unslothSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *unslothSection) Name() string  { return "Unsloth Studio" }
 func (s *unslothSection) Enabled() bool { return !(s.disabled != nil && s.disabled["Unsloth"]) }
 func (s *unslothSection) Render(w int) string {
-	return renderUnslothStudio(s.snapshot.UnslothStudio, w, s.disabled)
+	return RenderUnslothStudio(s.snapshot.UnslothStudio, w, s.disabled)
 }
 
 type ollamaProcessSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *ollamaProcessSection) Name() string  { return "Ollama Processes" }
 func (s *ollamaProcessSection) Enabled() bool { return !(s.disabled != nil && s.disabled["Ollama"]) }
 func (s *ollamaProcessSection) Render(w int) string {
-	return renderOllamaProcesses(s.snapshot.OllamaProcesses, w, s.disabled)
+	return RenderOllamaProcesses(s.snapshot.OllamaProcesses, w, s.disabled)
 }
 
 type ollamaModelSection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *ollamaModelSection) Name() string  { return "Ollama Models" }
 func (s *ollamaModelSection) Enabled() bool { return !(s.disabled != nil && s.disabled["Ollama"]) }
 func (s *ollamaModelSection) Render(w int) string {
-	return renderOllamaPS(s.snapshot.OllamaPS, w, s.disabled)
+	return RenderOllamaPS(s.snapshot.OllamaPS, w, s.disabled)
 }
 
 type memorySection struct {
-	snapshot snapshot
+	snapshot Snapshot
 	disabled map[string]bool
 }
 
 func (s *memorySection) Name() string  { return "Memory" }
 func (s *memorySection) Enabled() bool { return !(s.disabled != nil && s.disabled["Memory"]) }
 func (s *memorySection) Render(w int) string {
-	return renderMemoryCard(s.snapshot.Memory, s.snapshot.Swap, s.snapshot.RAMHistory, w)
+	return RenderMemoryCard(s.snapshot.Memory, s.snapshot.Swap, s.snapshot.RAMHistory, w)
 }
