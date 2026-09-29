@@ -14,7 +14,6 @@ func makeSections(s snapshot, disabled map[string]bool) []section {
 	return []section{
 		&gpuSection{snapshot: s, disabled: disabled},
 		&amdSection{snapshot: s, disabled: disabled},
-		&inferenceSection{snapshot: s, disabled: disabled},
 		&memorySection{snapshot: s, disabled: disabled},
 		&unslothSection{snapshot: s, disabled: disabled},
 		&ollamaProcessSection{snapshot: s, disabled: disabled},
@@ -60,20 +59,6 @@ type systemSection struct {
 func (s *systemSection) Name() string        { return "System" }
 func (s *systemSection) Enabled() bool       { return !(s.disabled != nil && s.disabled["System"]) }
 func (s *systemSection) Render(w int) string { return renderSystem(s.snapshot, w, s.disabled) }
-
-type inferenceSection struct {
-	snapshot snapshot
-	disabled map[string]bool
-}
-
-func (s *inferenceSection) Name() string  { return "Unified Inference" }
-func (s *inferenceSection) Enabled() bool { return true }
-func (s *inferenceSection) Render(w int) string {
-	if len(s.snapshot.Inference) == 0 {
-		return ""
-	}
-	return renderInference(s.snapshot.Inference, w, s.disabled)
-}
 
 type gpuSection struct {
 	snapshot snapshot

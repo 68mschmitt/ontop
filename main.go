@@ -2140,88 +2140,6 @@ func otherProcesses(processes []gpuProcess) []gpuProcess {
 	return out
 }
 
-func renderInference(inference []inferenceProcess, width int, disabledSections map[string]bool) string {
-	if len(inference) == 0 {
-		if disabledSections != nil && disabledSections["GPU"] {
-			return ""
-		}
-		return renderCard("Unified Inference", mutedStyle.Render("No models detected/loaded"), width)
-	}
-
-	innerWidth := maxInt(20, width-6)
-	lines := make([]string, 0)
-
-	llm := llmProcessesFromInference(inference)
-	other := otherProcessesFromInference(inference)
-
-	if len(llm) > 0 {
-		lines = append(lines, labelStyle.Render("LLM Processes"))
-		lines = append(lines, renderInferenceTable(llm, innerWidth))
-	}
-	if len(other) > 0 {
-		lines = append(lines, labelStyle.Render("Other Processes"))
-		lines = append(lines, renderInferenceTable(other, innerWidth))
-	}
-
-	return renderCard("Unified Inference", strings.Join(lines, "\n"), width)
-}
-
-func llmProcessesFromInference(inference []inferenceProcess) []inferenceProcess {
-	out := make([]inferenceProcess, 0)
-	for _, p := range inference {
-		if p.Provider != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func otherProcessesFromInference(inference []inferenceProcess) []inferenceProcess {
-	out := make([]inferenceProcess, 0)
-	for _, p := range inference {
-		if p.Provider == "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func renderInferenceTable(processes []inferenceProcess, width int) string {
-	if width < 48 {
-		processWidth := maxInt(8, width-18)
-		lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
-		for _, p := range processes {
-			name := p.Name
-			if name == "" {
-				name = "unknown"
-			}
-			vramStr := optMemoryString(p.VRAMMiB)
-			var percent float64
-			if p.VRAMMiB.OK {
-				percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
-			}
-			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), fitText(name, processWidth)))
-		}
-		return strings.Join(lines, "\n")
-	}
-
-	processWidth := maxInt(12, width-38)
-	lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %-9s %s", "PID", "Provider", "VRAM", "PROCESS"))}
-	for _, p := range processes {
-		name := p.Name
-		if name == "" {
-			name = "unknown"
-		}
-		vramStr := optMemoryString(p.VRAMMiB)
-		var percent float64
-		if p.VRAMMiB.OK {
-			percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
-		}
-		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, labelStyle.Render(p.Provider), coloredValue(vramStr, percent), fitText(name, processWidth)))
-	}
-	return strings.Join(lines, "\n")
-}
-
 func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int, disabledSections map[string]bool) string {
 	if len(gpus) == 0 {
 		return ""
@@ -2347,16 +2265,6 @@ func renderAMDSection(gpus []amdGPUStats, width int, disabledSections map[string
 		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
 
 		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})))
-
-		llm := llmAMDProcesses(gpu.Processes)
-		other := otherAMDProcesses(gpu.Processes)
-
-		if len(llm) > 0 {
-			lines = append(lines, renderAMDProcessTable(llm, innerWidth))
-		}
-		if len(other) > 0 {
-			lines = append(lines, renderAMDProcessTable(other, innerWidth))
-		}
 	}
 
 	return renderCard("AMD GPU", strings.Join(lines, "\n"), width)

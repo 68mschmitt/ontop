@@ -143,35 +143,6 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 	}
 }
 
-func TestRenderInferenceEmptyCard(t *testing.T) {
-	card := renderInference(nil, 80, nil)
-	if !strings.Contains(card, "Unified Inference") || !strings.Contains(card, "No models detected/loaded") {
-		t.Fatalf("expected empty inference card: %q", card)
-	}
-}
-
-func TestRenderInferenceGrouping(t *testing.T) {
-	inference := []inferenceProcess{
-		{PID: 200, Provider: "Unsloth", Name: "unsloth-trainer", VRAMMiB: optFloat{Value: 12288, OK: true}, GTTMiB: optFloat{Value: 16, OK: true}},
-		{PID: 100, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}, GTTMiB: optFloat{Value: 8, OK: true}},
-		{PID: 50, Name: "chrome", VRAMMiB: optFloat{Value: 2048, OK: true}, GTTMiB: optFloat{}},
-	}
-
-	content := renderInference(inference, 120, nil)
-	if !strings.Contains(content, "Unified Inference") {
-		t.Fatalf("expected inference card: %q", content)
-	}
-	if !strings.Contains(content, "LLM Processes") || !strings.Contains(content, "Other Processes") {
-		t.Fatalf("expected LLM and Other sub-tables: %q", content)
-	}
-	if !strings.Contains(content, "Unsloth") || !strings.Contains(content, "Ollama") {
-		t.Fatalf("expected provider labels in LLM table: %q", content)
-	}
-	if !strings.Contains(content, "chrome") {
-		t.Fatalf("expected chrome in Other table: %q", content)
-	}
-}
-
 func TestRenderGPUSectionGrouping(t *testing.T) {
 	gpus := []gpuStats{
 		{
@@ -240,7 +211,7 @@ func TestRenderContentOrdering(t *testing.T) {
 		}
 		return b - a
 	}
-	if wantOrder("NVIDIA GPU", "AMD GPU") > 0 || wantOrder("AMD GPU", "Unified Inference") > 0 || wantOrder("Unified Inference", "System") > 0 {
+	if wantOrder("NVIDIA GPU", "AMD GPU") > 0 || wantOrder("AMD GPU", "Memory") > 0 || wantOrder("Memory", "System") > 0 {
 		t.Fatalf("unexpected section ordering: %q", content)
 	}
 }
@@ -368,17 +339,6 @@ func BenchmarkHumanBytes(b *testing.B) {
 func BenchmarkClassifyProvider(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		classifyProvider("python", "python3 -m torch.nn.parallel.DistributedDataParallel --ollama")
-	}
-}
-
-func BenchmarkRenderInferenceTable(b *testing.B) {
-	procs := []inferenceProcess{
-		{PID: 1, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
-		{PID: 2, Provider: "Unsloth", Name: "python-unsloth", VRAMMiB: optFloat{Value: 12288, OK: true}},
-		{PID: 3, Provider: "", Name: "chrome", VRAMMiB: optFloat{Value: 2048, OK: true}},
-	}
-	for i := 0; i < b.N; i++ {
-		renderInferenceTable(procs, 120)
 	}
 }
 
