@@ -1942,16 +1942,6 @@ func renderCPU(stats cpuStats, history []float64, width int) string {
 		metricLine("Total", stats.Total, fmt.Sprintf("%.1f%%", stats.Total), innerWidth),
 	}
 
-	if len(stats.PerCore) == 0 {
-		if len(history) > 0 {
-			spark := renderSparkline(history, minInt(len(history), innerWidth-10))
-			lines = append(lines, mutedStyle.Render("trend: "+spark))
-		}
-		return strings.Join(lines, "\n")
-	}
-
-	lines = append(lines, renderCoreRow(stats.PerCore, innerWidth))
-
 	if len(history) > 0 {
 		spark := renderSparkline(history, minInt(len(history), innerWidth-10))
 		lines = append(lines, mutedStyle.Render("trend: "+spark))
