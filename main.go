@@ -28,6 +28,7 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 
 	"ontop/internal/collect"
+	"ontop/internal/parse"
 )
 
 const defaultInterval = time.Second
@@ -37,8 +38,6 @@ const version = "dev"
 var studioPort = 8888
 var studioToken = ""
 
-// classifyProvider maps a process name and optional cmdline to a specific
-// provider label. Returns "" for unrecognized names (rendered as "other").
 var prevSnapshot snapshot
 var prevDiskIO map[string]diskDeviceStats
 var prevNetIO map[string]netDeviceStats
@@ -46,37 +45,6 @@ var CurrentTheme Theme = themes["dark"]
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-func classifyProvider(name string, cmdline string) string {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	cmdLower := strings.ToLower(strings.TrimSpace(cmdline))
-
-	text := lower + " " + cmdLower
-
-	switch {
-	case strings.Contains(text, "python") && (strings.Contains(text, "transform") || strings.Contains(text, "torch") || strings.Contains(text, "pytorch") || strings.Contains(text, "huggingface") || strings.Contains(text, "llama") || strings.Contains(text, "bert") || strings.Contains(text, "gpt")):
-		return "PyTorch"
-	case strings.Contains(text, "python") && (strings.Contains(text, "ollama")):
-		return "Ollama"
-	case strings.Contains(text, "python") && (strings.Contains(text, "unsloth")):
-		return "Unsloth"
-	case strings.Contains(text, "python") && (strings.Contains(text, "text-generation") || strings.Contains(text, "vllm")):
-		return "vLLM"
-	case strings.Contains(text, "python") && (strings.Contains(text, "kobold")):
-		return "KoboldCPP"
-	case strings.Contains(text, "ollama") && !strings.Contains(text, "python"):
-		return "Ollama"
-	case strings.Contains(text, "unsloth"):
-		return "Unsloth"
-	case strings.Contains(text, "vllm") || strings.Contains(text, "text-generation"):
-		return "vLLM"
-	case strings.Contains(text, "kobold"):
-		return "KoboldCPP"
-	case strings.Contains(text, "xtt") || strings.Contains(text, "voyager") || strings.Contains(text, "sglm") || strings.Contains(text, "llama.cpp") || strings.Contains(text, "llama-srv"):
-		return "Local Inference"
-	default:
-		return ""
-	}
-}
 
 type tickMsg time.Time
 
@@ -763,7 +731,7 @@ func collectNVIDIA(ctx context.Context, warnings *[]string, prevGpus []gpuStats)
 		return nil
 	}
 
-	gpus, err := parseGPUCSV(stdout)
+	gpus, err := parse.ParseGPUCSV(stdout)
 	if err != nil {
 		addWarning(warnings, "could not parse nvidia-smi GPU metrics: "+cleanError(err.Error()))
 		return nil
@@ -809,7 +777,7 @@ func collectAMD(ctx context.Context, warnings *[]string, prevGpus []amdGPUStats)
 		return stats
 	}
 
-	gpus, err := parseAMDJSON(stdout)
+	gpus, err := parse.ParseAMDJSON(stdout)
 	if err != nil {
 		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
 		stats := collectAMDFromSysfs(warnings)
@@ -877,7 +845,7 @@ func collectInference(ctx context.Context, nvidia []gpuStats, amd []amdGPUStats,
 }
 
 func parseGPUCSV(output string) ([]gpuStats, error) {
-	records, err := readCSV(output)
+	records, err := parse.ReadCSV(output)
 	if err != nil {
 		return nil, err
 	}
@@ -892,152 +860,19 @@ func parseGPUCSV(output string) ([]gpuStats, error) {
 			Index:       strings.TrimSpace(row[0]),
 			Name:        strings.TrimSpace(row[1]),
 			UUID:        strings.TrimSpace(row[2]),
-			UtilPercent: parseOptFloat(row[3]),
-			MemoryUsed:  parseOptFloat(row[4]),
-			MemoryTotal: parseOptFloat(row[5]),
-			Temperature: parseOptFloat(row[6]),
-			PowerDraw:   parseOptFloat(row[7]),
-			PowerLimit:  parseOptFloat(row[8]),
-			FanPercent:  parseOptFloat(row[9]),
+			UtilPercent: parse.ParseOptFloat(row[3]),
+			MemoryUsed:  parse.ParseOptFloat(row[4]),
+			MemoryTotal: parse.ParseOptFloat(row[5]),
+			Temperature: parse.ParseOptFloat(row[6]),
+			PowerDraw:   parse.ParseOptFloat(row[7]),
+			PowerLimit:  parse.ParseOptFloat(row[8]),
+			FanPercent:  parse.ParseOptFloat(row[9]),
 		})
 	}
 
 	return gpus, nil
 }
 
-type amdTopDocument struct {
-	Devices []amdTopDevice `json:"devices"`
-}
-
-type amdTopDevice struct {
-	Info struct {
-		DeviceName string `json:"DeviceName"`
-		DevicePath struct {
-			PCI string `json:"pci"`
-		} `json:"DevicePath"`
-	} `json:"Info"`
-	GPUActivity map[string]json.RawMessage `json:"gpu_activity"`
-	Sensors     map[string]json.RawMessage `json:"Sensors"`
-	VRAM        map[string]json.RawMessage `json:"VRAM"`
-	FDInfo      map[string]json.RawMessage `json:"fdinfo"`
-}
-
-func parseAMDJSON(output string) ([]amdGPUStats, error) {
-	var document amdTopDocument
-	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &document); err != nil {
-		return nil, err
-	}
-
-	gpus := make([]amdGPUStats, 0, len(document.Devices))
-	for i, device := range document.Devices {
-		gpu := amdGPUStats{
-			Index:       strconv.Itoa(i),
-			PCI:         device.Info.DevicePath.PCI,
-			Name:        device.Info.DeviceName,
-			UtilPercent: amdMetric(device.GPUActivity, "GFX"),
-			MemoryUsed:  amdMetric(device.VRAM, "Total VRAM Usage"),
-			MemoryTotal: amdMetric(device.VRAM, "Total VRAM"),
-			Temperature: firstAMDMetric(device.Sensors, "Junction Temperature", "Edge Temperature"),
-			PowerDraw:   firstAMDMetric(device.Sensors, "Average Power", "GFX Power", "Input Power"),
-			FanPercent:  firstAMDMetric(device.Sensors, "Fan Speed", "Fan"),
-			Processes:   parseAMDProcesses(device.FDInfo),
-		}
-		if gpu.Name == "" {
-			gpu.Name = "AMD GPU"
-		}
-		gpus = append(gpus, gpu)
-	}
-
-	return gpus, nil
-}
-
-func parseAMDProcesses(raw map[string]json.RawMessage) []amdGPUProcess {
-	processes := make([]amdGPUProcess, 0, len(raw))
-	for pidString, processRaw := range raw {
-		pid, err := strconv.ParseInt(pidString, 10, 32)
-		if err != nil {
-			continue
-		}
-
-		name, vram, gtt := parseAMDProcess(processRaw)
-		processes = append(processes, amdGPUProcess{
-			PID:      int32(pid),
-			Provider: classifyProvider(name, ""),
-			Name:     name,
-			VRAMMiB:  vram,
-			GTTMiB:   gtt,
-		})
-	}
-
-	sort.Slice(processes, func(i, j int) bool {
-		return processes[i].PID < processes[j].PID
-	})
-	return processes
-}
-
-func parseAMDProcess(raw json.RawMessage) (string, optFloat, optFloat) {
-	var current map[string]json.RawMessage
-	if json.Unmarshal(raw, &current) != nil {
-		return "", optFloat{}, optFloat{}
-	}
-
-	name := ""
-	if value, ok := current["name"]; ok {
-		_ = json.Unmarshal(value, &name)
-	}
-
-	for depth := 0; depth < 4; depth++ {
-		if value, ok := current["VRAM"]; ok {
-			return name, amdMetricValue(value), amdNestedMetric(current, "GTT")
-		}
-		value, ok := current["usage"]
-		if !ok || json.Unmarshal(value, &current) != nil {
-			break
-		}
-	}
-
-	return name, optFloat{}, optFloat{}
-}
-
-func amdNestedMetric(metrics map[string]json.RawMessage, key string) optFloat {
-	value, ok := metrics[key]
-	if !ok {
-		return optFloat{}
-	}
-	return amdMetricValue(value)
-}
-
-func amdMetric(metrics map[string]json.RawMessage, key string) optFloat {
-	value, ok := metrics[key]
-	if !ok {
-		return optFloat{}
-	}
-	return amdMetricValue(value)
-}
-
-func firstAMDMetric(metrics map[string]json.RawMessage, keys ...string) optFloat {
-	for _, key := range keys {
-		if value := amdMetric(metrics, key); value.OK {
-			return value
-		}
-	}
-	return optFloat{}
-}
-
-func amdMetricValue(raw json.RawMessage) optFloat {
-	var value struct {
-		Value *float64 `json:"value"`
-	}
-	if json.Unmarshal(raw, &value) == nil && value.Value != nil {
-		return optFloat{Value: *value.Value, OK: true}
-	}
-
-	var number float64
-	if json.Unmarshal(raw, &number) == nil {
-		return optFloat{Value: number, OK: true}
-	}
-	return optFloat{}
-}
 
 // processCmdline reads the full command line for a PID from /proc.
 func processCmdline(pid int32) string {
@@ -1080,7 +915,7 @@ func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
 		return nil, "nvidia-smi process query failed: " + cleanCommandError(err, stderr)
 	}
 
-	records, err := readCSV(stdout)
+	records, err := parse.ReadCSV(stdout)
 	if err != nil {
 		return nil, "could not parse nvidia-smi process metrics: " + cleanError(err.Error())
 	}
@@ -1106,9 +941,9 @@ func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
 		processes = append(processes, gpuProcess{
 			GPUUUID:      strings.TrimSpace(row[0]),
 			PID:          int32(pid64),
-			Provider:     classifyProvider(processName, cmdline),
+			Provider:     parse.ClassifyProvider(processName, cmdline),
 			Name:         displayName,
-			UsedMemoryMB: parseOptFloat(row[3]),
+			UsedMemoryMB: parse.ParseOptFloat(row[3]),
 		})
 	}
 
@@ -1187,7 +1022,7 @@ func collectOllamaPS(ctx context.Context) commandOutput {
 	stdout, stderr, err := runCommand(ctx, "ollama", "ps", "--json")
 	if err == nil {
 		output := strings.TrimSpace(stdout)
-		models := parseOllamaPSJSON(output)
+		models := parse.ParseOllamaPSJSON(output)
 		return commandOutput{Output: output, Models: models}
 	}
 
@@ -1197,83 +1032,9 @@ func collectOllamaPS(ctx context.Context) commandOutput {
 	}
 
 	output := strings.TrimSpace(textStdout)
-	return commandOutput{Output: output, Models: parseOllamaPS(output)}
+	return commandOutput{Output: output, Models: parse.ParseOllamaPS(output)}
 }
 
-func parseOllamaPSJSON(output string) []ollamaModel {
-	var models []ollamaModel
-
-	type ollamaLine struct {
-		Name          string  `json:"name"`
-		Id            string  `json:"id"`
-		Size          float64 `json:"size"`
-		SizeVRAM      float64 `json:"size_vram"`
-		TransferRate  string  `json:"transfer_rate"`
-		ContextLength int     `json:"context_length"`
-		PromptTokens  int     `json:"prompt_tokens"`
-		OutputTokens  int     `json:"output_tokens"`
-	}
-
-	var lines []ollamaLine
-	if err := json.Unmarshal([]byte(output), &lines); err != nil {
-		return nil
-	}
-
-	for _, l := range lines {
-		sizeGB := l.Size / 1e9
-		models = append(models, ollamaModel{
-			Name:         l.Name,
-			ID:           l.Id,
-			Size:         fmt.Sprintf("%.1f GB", sizeGB),
-			PromptTokens: l.PromptTokens,
-			CtxTokens:    l.ContextLength,
-		})
-	}
-
-	return models
-}
-
-func parseOllamaPS(output string) []ollamaModel {
-	var models []ollamaModel
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 || strings.EqualFold(fields[0], "name") {
-			continue
-		}
-
-		processorStart := -1
-		contextIndex := -1
-		for i := 2; i < len(fields); i++ {
-			if strings.Contains(fields[i], "%") {
-				processorStart = i
-				break
-			}
-		}
-		if processorStart < 0 {
-			continue
-		}
-		for i := processorStart + 1; i < len(fields); i++ {
-			contextField := strings.ToUpper(strings.TrimSuffix(fields[i], ","))
-			if _, err := strconv.ParseInt(contextField, 10, 64); err == nil || strings.HasSuffix(contextField, "K") || strings.HasSuffix(contextField, "M") {
-				contextIndex = i
-				break
-			}
-		}
-		if contextIndex < 0 {
-			continue
-		}
-
-		models = append(models, ollamaModel{
-			Name:      fields[0],
-			ID:        fields[1],
-			Size:      strings.Join(fields[2:processorStart], " "),
-			Processor: strings.Join(fields[processorStart:contextIndex], " "),
-			Context:   fields[contextIndex],
-			Until:     strings.Join(fields[contextIndex+1:], " "),
-		})
-	}
-	return models
-}
 
 func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudioStats {
 	base := discoverStudioBase(ctx)
@@ -1412,32 +1173,6 @@ func runCommand(ctx context.Context, name string, args ...string) (string, strin
 	return stdout.String(), stderr.String(), err
 }
 
-func readCSV(output string) ([][]string, error) {
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return nil, nil
-	}
-
-	r := csv.NewReader(strings.NewReader(output))
-	r.TrimLeadingSpace = true
-	r.FieldsPerRecord = -1
-
-	return r.ReadAll()
-}
-
-func parseOptFloat(raw string) optFloat {
-	value := strings.TrimSpace(raw)
-	lower := strings.ToLower(value)
-	if value == "" || lower == "n/a" || lower == "na" || strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") {
-		return optFloat{}
-	}
-
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return optFloat{}
-	}
-	return optFloat{Value: parsed, OK: true}
-}
 
 func renderHeader(s snapshot, interval time.Duration, loading bool, flashActive bool, currentFrame string, width int) string {
 	updated := "waiting for first sample"
