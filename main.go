@@ -542,11 +542,11 @@ func (m model) View() string {
 	}
 
 	if m.showHelp {
-		return renderHelpOverlay(width)
+		return renderHelpOverlay(width, m.disabledSections)
 	}
 
 	header := renderHeader(m.snapshot, m.interval, m.loading, width)
-	footer := renderFooter(width)
+	footer := renderFooter(width, m.disabledSections)
 	vp := m.viewport
 	vp.Height = maxInt(1, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-1)
 
@@ -1595,13 +1595,41 @@ func renderHeader(s snapshot, interval time.Duration, loading bool, width int) s
 	return headerStyle.Width(maxInt(20, width-2)).Render(header)
 }
 
-func renderFooter(width int) string {
-	text := "q quit | ctrl+c quit | r refresh | up/down scroll | pgup/pgdn page"
-	text += " | s system | g GPU | u unsloth | o ollama | ? help"
+func renderFooter(width int, disabledSections map[string]bool) string {
+	var toggles []string
+	sections := []struct {
+		key       string
+		name      string
+		active    bool
+	}{
+		{"s", "System", !isEnabled(disabledSections, "System")},
+		{"g", "GPU", !isEnabled(disabledSections, "GPU")},
+		{"u", "Unsloth", !isEnabled(disabledSections, "Unsloth")},
+		{"o", "Ollama", !isEnabled(disabledSections, "Ollama")},
+	}
+	enabledStyle := lipgloss.NewStyle().Foreground(accentColor)
+	disabledStyle := lipgloss.NewStyle().Foreground(mutedColor)
+	for _, sec := range sections {
+		if sec.active {
+			toggles = append(toggles, fmt.Sprintf("%s %s", sec.key, enabledStyle.Render(sec.name)))
+		} else {
+			toggles = append(toggles, fmt.Sprintf("%s %s", sec.key, disabledStyle.Render(sec.name)))
+		}
+	}
+	toggleText := strings.Join(toggles, "  ")
+	keysText := "q quit | ctrl+c quit | r refresh | up/down scroll | pgup/pgdn page | ? help"
+	text := toggleText + "      " + keysText
 	return footerStyle.Width(maxInt(20, width-2)).Render(fitText(text, maxInt(10, width-4)))
 }
 
-func renderHelpOverlay(width int) string {
+func isEnabled(disabledSections map[string]bool, name string) bool {
+	if disabledSections == nil {
+		return true
+	}
+	return !disabledSections[name]
+}
+
+func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 	lines := []string{
 		"q / Ctrl+C   quit",
 		"r            refresh",
@@ -1616,7 +1644,35 @@ func renderHelpOverlay(width int) string {
 		"pgup/pgdn    page scroll",
 	}
 	body := strings.Join(lines, "\n")
-	return renderCard("Key Bindings", mutedStyle.Render(body), width) + "\n\n" + renderCard("Press any key to close", mutedStyle.Render(""), width)
+	card1 := renderCard("Key Bindings", mutedStyle.Render(body), width)
+	card2 := renderCard("Press any key to close", mutedStyle.Render(""), width)
+
+	var stateLines []string
+	sections := []struct {
+		name   string
+		active bool
+	}{
+		{"System", isEnabled(disabledSections, "System")},
+		{"GPU", isEnabled(disabledSections, "GPU")},
+		{"Unsloth", isEnabled(disabledSections, "Unsloth")},
+		{"Ollama", isEnabled(disabledSections, "Ollama")},
+	}
+	enabledStyle := lipgloss.NewStyle().Foreground(accentColor)
+	disabledStyle := lipgloss.NewStyle().Foreground(mutedColor)
+	stateParts := make([]string, 0, len(sections))
+	for _, sec := range sections {
+		pair := sec.name + ": "
+		if sec.active {
+			pair += enabledStyle.Render("[✓]")
+		} else {
+			pair += disabledStyle.Render("[✗]")
+		}
+		stateParts = append(stateParts, pair)
+	}
+	stateLines = append(stateLines, "Sections:  [✓] = enabled  [✗] = disabled", "")
+	stateLines = append(stateLines, strings.Join(stateParts, "  "))
+
+	return card1 + "\n\n" + card2 + "\n\n" + renderCard("Section State", strings.Join(stateLines, "\n"), width)
 }
 
 func renderContent(s snapshot, width int, disabledSections map[string]bool) string {
@@ -2025,10 +2081,7 @@ func otherAMDProcesses(processes []amdGPUProcess) []amdGPUProcess {
 
 func renderAMDSection(gpus []amdGPUStats, width int, disabledSections map[string]bool) string {
 	if len(gpus) == 0 {
-		if disabledSections != nil && disabledSections["GPU"] {
-			return ""
-		}
-		return renderCard("AMD GPU", mutedStyle.Render("No AMD data"), width)
+		return ""
 	}
 	if disabledSections != nil && disabledSections["GPU"] {
 		return ""
