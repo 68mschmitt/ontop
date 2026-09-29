@@ -290,14 +290,25 @@ var keys = keyMap{
 	),
 }
 
+type config struct {
+	Interval     time.Duration
+	GPUFilter    int
+	Theme        string
+	NoSparklines bool
+	ShowNotices  bool
+}
+
 type model struct {
-	interval time.Duration
-	width    int
-	height   int
-	ready    bool
-	loading  bool
-	viewport viewport.Model
-	snapshot snapshot
+	interval         time.Duration
+	width            int
+	height           int
+	ready            bool
+	loading          bool
+	viewport         viewport.Model
+	snapshot         snapshot
+	showHelp         bool
+	disabledSections map[string]bool
+	cfg              config
 }
 
 var (
@@ -340,6 +351,13 @@ func main() {
 		return
 	}
 
+	envInterval := os.Getenv("ONTOP_INTERVAL")
+	if envInterval != "" {
+		if parsed, err := time.ParseDuration(envInterval); err == nil {
+			interval = &parsed
+		}
+	}
+
 	// Support env var as fallback for token.
 	if studioToken == "" {
 		studioToken = os.Getenv("UNSLOTH_STUDIO_TOKEN")
@@ -350,21 +368,23 @@ func main() {
 		os.Exit(2)
 	}
 
-	p := tea.NewProgram(newModel(*interval), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(*interval, config{}), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to run dashboard: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func newModel(interval time.Duration) model {
+func newModel(interval time.Duration, cfg config) model {
 	vp := viewport.New(100, 24)
 	vp.Style = lipgloss.NewStyle()
 
 	return model{
-		interval: interval,
-		loading:  true,
-		viewport: vp,
+		interval:         interval,
+		loading:          true,
+		viewport:         vp,
+		disabledSections: make(map[string]bool),
+		cfg:              cfg,
 	}
 }
 
@@ -377,6 +397,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -384,6 +408,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.loading {
 				m.loading = true
 				cmds = append(cmds, collectMetricsCmd())
+			}
+		}
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			switch msg.Runes[0] {
+			case 'g':
+				if m.disabledSections == nil {
+					m.disabledSections = make(map[string]bool)
+				}
+				m.disabledSections["GPU"] = !m.disabledSections["GPU"]
+			case 's':
+				if m.disabledSections == nil {
+					m.disabledSections = make(map[string]bool)
+				}
+				m.disabledSections["System"] = !m.disabledSections["System"]
+			case 'u':
+				if m.disabledSections == nil {
+					m.disabledSections = make(map[string]bool)
+				}
+				m.disabledSections["Unsloth"] = !m.disabledSections["Unsloth"]
+			case 'o':
+				if m.disabledSections == nil {
+					m.disabledSections = make(map[string]bool)
+				}
+				m.disabledSections["Ollama"] = !m.disabledSections["Ollama"]
+			case '?', 'h':
+				m.showHelp = !m.showHelp
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -420,6 +470,10 @@ func (m model) View() string {
 		return "Collecting initial metrics..."
 	}
 
+	if m.showHelp {
+		return renderHelpOverlay(width)
+	}
+
 	header := renderHeader(m.snapshot, m.interval, m.loading, width)
 	footer := renderFooter(width)
 	vp := m.viewport
@@ -435,7 +489,7 @@ func (m *model) updateViewport() {
 
 	m.viewport.Width = maxInt(20, m.width)
 	m.viewport.Height = maxInt(1, m.height-5)
-	m.viewport.SetContent(renderContent(m.snapshot, m.viewport.Width))
+	m.viewport.SetContent(renderContent(m.snapshot, m.viewport.Width, m.disabledSections))
 }
 
 func tickCmd(interval time.Duration) tea.Cmd {
@@ -1443,10 +1497,29 @@ func renderHeader(s snapshot, interval time.Duration, loading bool, width int) s
 
 func renderFooter(width int) string {
 	text := "q quit | ctrl+c quit | r refresh | up/down scroll | pgup/pgdn page"
+	text += " | s system | g GPU | u unsloth | o ollama | ? help"
 	return footerStyle.Width(maxInt(20, width-2)).Render(fitText(text, maxInt(10, width-4)))
 }
 
-func renderContent(s snapshot, width int) string {
+func renderHelpOverlay(width int) string {
+	lines := []string{
+		"q / Ctrl+C   quit",
+		"r            refresh",
+		"s            toggle System (CPU/RAM)",
+		"g            toggle GPU (NVIDIA/AMD)",
+		"u            toggle Unsloth",
+		"o            toggle Ollama",
+		"h/?          hide this help",
+		"",
+		"Navigation:",
+		"up/down      scroll",
+		"pgup/pgdn    page scroll",
+	}
+	body := strings.Join(lines, "\n")
+	return renderCard("Key Bindings", mutedStyle.Render(body), width) + "\n\n" + renderCard("Press any key to close", mutedStyle.Render(""), width)
+}
+
+func renderContent(s snapshot, width int, disabledSections map[string]bool) string {
 	if s.CollectedAt.IsZero() {
 		return renderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
 	}
@@ -1458,15 +1531,15 @@ func renderContent(s snapshot, width int) string {
 		}
 	}
 	for _, section := range []string{
-		renderSystem(s, width),
-		renderInference(s.Inference, width),
-		renderGPUSection(s.GPUs, s.GPUSparkline, width),
-		renderAMDSection(s.AMDGPUs, width),
-		renderDiskCard(s.Disk, width),
-		renderNetCard(s.Net, width),
-		renderUnslothStudio(s.UnslothStudio, width),
-		renderOllamaProcesses(s.OllamaProcesses, width),
-		renderOllamaPS(s.OllamaPS, width),
+		renderSystem(s, width, disabledSections),
+		renderInference(s.Inference, width, disabledSections),
+		renderGPUSection(s.GPUs, s.GPUSparkline, width, disabledSections),
+		renderAMDSection(s.AMDGPUs, width, disabledSections),
+		renderDiskCard(s.Disk, width, disabledSections),
+		renderNetCard(s.Net, width, disabledSections),
+		renderUnslothStudio(s.UnslothStudio, width, disabledSections),
+		renderOllamaProcesses(s.OllamaProcesses, width, disabledSections),
+		renderOllamaPS(s.OllamaPS, width, disabledSections),
 	} {
 		if strings.TrimSpace(section) != "" {
 			sections = append(sections, section)
@@ -1493,7 +1566,10 @@ func renderWarnings(warnings []string, width int) string {
 	return renderCard("Notices", strings.Join(lines, "\n"), width)
 }
 
-func renderSystem(s snapshot, width int) string {
+func renderSystem(s snapshot, width int, disabledSections map[string]bool) string {
+	if disabledSections != nil && disabledSections["System"] {
+		return ""
+	}
 	cpuBody := renderCPU(s.CPU, width)
 	ramBody := renderMemory(s.Memory, width)
 
@@ -1585,8 +1661,11 @@ func renderThermal(stats thermalStats, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderDiskCard(stats diskStats, width int) string {
+func renderDiskCard(stats diskStats, width int, disabledSections map[string]bool) string {
 	if !stats.OK {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["Disk"] {
 		return ""
 	}
 	var text string
@@ -1622,8 +1701,11 @@ func renderDisk(stats diskStats, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderNetCard(stats netStats, width int) string {
+func renderNetCard(stats netStats, width int, disabledSections map[string]bool) string {
 	if !stats.OK {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["Network"] {
 		return ""
 	}
 	var text string
@@ -1681,8 +1763,11 @@ func otherProcesses(processes []gpuProcess) []gpuProcess {
 	return out
 }
 
-func renderInference(inference []inferenceProcess, width int) string {
+func renderInference(inference []inferenceProcess, width int, disabledSections map[string]bool) string {
 	if len(inference) == 0 {
+		if disabledSections != nil && disabledSections["GPU"] {
+			return ""
+		}
 		return renderCard("Unified Inference", mutedStyle.Render("No models detected/loaded"), width)
 	}
 
@@ -1750,8 +1835,11 @@ func renderInferenceTable(processes []inferenceProcess, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int) string {
+func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int, disabledSections map[string]bool) string {
 	if len(gpus) == 0 {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["GPU"] {
 		return ""
 	}
 
@@ -1835,9 +1923,15 @@ func otherAMDProcesses(processes []amdGPUProcess) []amdGPUProcess {
 	return out
 }
 
-func renderAMDSection(gpus []amdGPUStats, width int) string {
+func renderAMDSection(gpus []amdGPUStats, width int, disabledSections map[string]bool) string {
 	if len(gpus) == 0 {
+		if disabledSections != nil && disabledSections["GPU"] {
+			return ""
+		}
 		return renderCard("AMD GPU", mutedStyle.Render("No AMD data"), width)
+	}
+	if disabledSections != nil && disabledSections["GPU"] {
+		return ""
 	}
 
 	innerWidth := maxInt(20, width-6)
@@ -1937,8 +2031,11 @@ func renderAMDProcessTable(processes []amdGPUProcess, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderOllamaProcesses(processes []ollamaProcess, width int) string {
+func renderOllamaProcesses(processes []ollamaProcess, width int, disabledSections map[string]bool) string {
 	if len(processes) == 0 {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["Ollama"] {
 		return ""
 	}
 
@@ -1977,8 +2074,11 @@ func renderOllamaProcesses(processes []ollamaProcess, width int) string {
 	return renderCard("Ollama Processes", strings.Join(lines, "\n"), width)
 }
 
-func renderOllamaPS(output commandOutput, width int) string {
+func renderOllamaPS(output commandOutput, width int, disabledSections map[string]bool) string {
 	if output.Missing || output.Error != "" || strings.TrimSpace(output.Output) == "" {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["Ollama"] {
 		return ""
 	}
 
@@ -2018,11 +2118,14 @@ func renderOllamaPS(output commandOutput, width int) string {
 	return renderCard("Ollama Models", strings.Join(lines, "\n"), width)
 }
 
-func renderUnslothStudio(s unslothStudioStats, width int) string {
+func renderUnslothStudio(s unslothStudioStats, width int, disabledSections map[string]bool) string {
 	innerWidth := maxInt(20, width-6)
 
 	// Not connected at all.
 	if !s.Connected {
+		return ""
+	}
+	if disabledSections != nil && disabledSections["Unsloth"] {
 		return ""
 	}
 

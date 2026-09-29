@@ -59,7 +59,7 @@ func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
 }
 
 func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
-	content := renderContent(snapshot{CollectedAt: time.Now()}, 80)
+	content := renderContent(snapshot{CollectedAt: time.Now()}, 80, nil)
 	if strings.Contains(content, "NVIDIA GPU") || strings.Contains(content, "Unsloth Studio") || strings.Contains(content, "Ollama Processes") {
 		t.Fatalf("optional service card rendered without metrics: %q", content)
 	}
@@ -127,7 +127,7 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 }
 
 func TestRenderInferenceEmptyCard(t *testing.T) {
-	card := renderInference(nil, 80)
+	card := renderInference(nil, 80, nil)
 	if !strings.Contains(card, "Unified Inference") || !strings.Contains(card, "No models detected/loaded") {
 		t.Fatalf("expected empty inference card: %q", card)
 	}
@@ -140,7 +140,7 @@ func TestRenderInferenceGrouping(t *testing.T) {
 		{PID: 50, Name: "chrome", VRAMMiB: optFloat{Value: 2048, OK: true}, GTTMiB: optFloat{}},
 	}
 
-	content := renderInference(inference, 120)
+	content := renderInference(inference, 120, nil)
 	if !strings.Contains(content, "Unified Inference") {
 		t.Fatalf("expected inference card: %q", content)
 	}
@@ -167,7 +167,7 @@ func TestRenderGPUSectionGrouping(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, nil, 120)
+	content := renderGPUSection(gpus, nil, 120, nil)
 	if !strings.Contains(content, "NVIDIA GPU") {
 		t.Fatalf("expected NVIDIA card: %q", content)
 	}
@@ -190,7 +190,7 @@ func TestRenderGPUSectionLLMOnly(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, nil, 120)
+	content := renderGPUSection(gpus, nil, 120, nil)
 	if !strings.Contains(content, "NVIDIA GPU") || !strings.Contains(content, "LLM Processes") {
 		t.Fatalf("expected NVIDIA card with LLM table only: %q", content)
 	}
@@ -206,7 +206,7 @@ func TestRenderContentOrdering(t *testing.T) {
 	}
 	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
 
-	content := renderContent(s, 120)
+	content := renderContent(s, 120, nil)
 
 	idx := func(name string) int { return strings.Index(content, name) }
 	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
