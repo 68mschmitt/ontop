@@ -43,6 +43,7 @@ type snapshot struct {
 	CollectedAt      time.Time
 	CPU              cpuStats
 	Memory           memoryStats
+	Swap             swapMemoryStats
 	GPUs             []gpuStats
 	AMDGPUs          []amdGPUStats
 	Inference        []inferenceProcess
@@ -73,6 +74,12 @@ type memoryStats struct {
 	Total     uint64
 	Available uint64
 	Percent   float64
+}
+
+type swapMemoryStats struct {
+	OK    bool
+	Used  uint64
+	Total uint64
 }
 
 type gpuStats struct {
@@ -172,20 +179,34 @@ type unslothStudioStats struct {
 	Error               string
 }
 
-// classifyProvider maps a process name to a specific provider label.
-// Returns "" for unrecognized names (rendered as "other").
-func classifyProvider(name string) string {
+// classifyProvider maps a process name and optional cmdline to a specific
+// provider label. Returns "" for unrecognized names (rendered as "other").
+func classifyProvider(name string, cmdline string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	switch lower {
-	case "ollama":
+	cmdLower := strings.ToLower(strings.TrimSpace(cmdline))
+
+	text := lower + " " + cmdLower
+
+	switch {
+	case strings.Contains(text, "python") && (strings.Contains(text, "transform") || strings.Contains(text, "torch") || strings.Contains(text, "pytorch") || strings.Contains(text, "huggingface") || strings.Contains(text, "llama") || strings.Contains(text, "bert") || strings.Contains(text, "gpt")):
+		return "PyTorch"
+	case strings.Contains(text, "python") && (strings.Contains(text, "ollama")):
 		return "Ollama"
-	case "unsloth", "python-unsloth", "unsloth-trainer":
+	case strings.Contains(text, "python") && (strings.Contains(text, "unsloth")):
 		return "Unsloth"
-	case "vllm", "text-generation-server":
+	case strings.Contains(text, "python") && (strings.Contains(text, "text-generation") || strings.Contains(text, "vllm")):
 		return "vLLM"
-	case "koboldcpp":
+	case strings.Contains(text, "python") && (strings.Contains(text, "kobold")):
 		return "KoboldCPP"
-	case "xtt", "voyager", "sglm", "llama.cpp", "llama-srv":
+	case strings.Contains(text, "ollama") && !strings.Contains(text, "python"):
+		return "Ollama"
+	case strings.Contains(text, "unsloth"):
+		return "Unsloth"
+	case strings.Contains(text, "vllm") || strings.Contains(text, "text-generation"):
+		return "vLLM"
+	case strings.Contains(text, "kobold"):
+		return "KoboldCPP"
+	case strings.Contains(text, "xtt") || strings.Contains(text, "voyager") || strings.Contains(text, "sglm") || strings.Contains(text, "llama.cpp") || strings.Contains(text, "llama-srv"):
 		return "Local Inference"
 	default:
 		return ""
@@ -383,9 +404,10 @@ func collectMetrics(ctx context.Context) snapshot {
 
 	s.CPU = collectCPU(ctx, &s.Warnings)
 	s.Memory = collectMemory(ctx, &s.Warnings)
+	s.Swap = collectSwap(ctx, &s.Warnings)
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
-	s.Inference = collectInference(ctx, &s.Warnings)
+	s.Inference = collectInference(ctx, s.GPUs, s.AMDGPUs, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
 	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
@@ -429,6 +451,20 @@ func collectMemory(ctx context.Context, warnings *[]string) memoryStats {
 		Total:     vm.Total,
 		Available: vm.Available,
 		Percent:   vm.UsedPercent,
+	}
+}
+
+func collectSwap(ctx context.Context, warnings *[]string) swapMemoryStats {
+	vm, err := mem.SwapMemoryWithContext(ctx)
+	if err != nil {
+		addWarning(warnings, "swap metrics unavailable: "+cleanError(err.Error()))
+		return swapMemoryStats{}
+	}
+
+	return swapMemoryStats{
+		OK:    true,
+		Used:  vm.Used,
+		Total: vm.Total,
 	}
 }
 
@@ -487,30 +523,40 @@ func collectAMD(ctx context.Context, warnings *[]string) []amdGPUStats {
 	return gpus
 }
 
-func collectInference(ctx context.Context, warnings *[]string) []inferenceProcess {
-	if _, err := exec.LookPath("amdgpu_top"); err != nil {
-		return nil
-	}
-
-	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
-	if err != nil {
-		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
-		return nil
-	}
-
-	gpus, err := parseAMDJSON(stdout)
-	if err != nil {
-		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
-		return nil
-	}
-
+// buildInferenceProcessList correlates GPU processes from already-collected
+// NVIDIA and AMD data into a unified sorted inference process list.
+func buildInferenceProcessList(nvidia []gpuStats, amd []amdGPUStats) []inferenceProcess {
 	inference := make([]inferenceProcess, 0)
-	for _, gpu := range gpus {
+
+	for _, gpu := range nvidia {
 		for _, p := range gpu.Processes {
+			if !p.UsedMemoryMB.OK {
+				continue
+			}
+			name := p.Name
+			if name == "" {
+				name = "unknown"
+			}
 			inference = append(inference, inferenceProcess{
 				PID:      p.PID,
 				Provider: p.Provider,
-				Name:     p.Name,
+				Name:     name,
+				VRAMMiB:  p.UsedMemoryMB,
+				GTTMiB:   optFloat{},
+			})
+		}
+	}
+
+	for _, gpu := range amd {
+		for _, p := range gpu.Processes {
+			name := p.Name
+			if name == "" {
+				name = "unknown"
+			}
+			inference = append(inference, inferenceProcess{
+				PID:      p.PID,
+				Provider: p.Provider,
+				Name:     name,
 				VRAMMiB:  p.VRAMMiB,
 				GTTMiB:   p.GTTMiB,
 			})
@@ -525,6 +571,10 @@ func collectInference(ctx context.Context, warnings *[]string) []inferenceProces
 	})
 
 	return inference
+}
+
+func collectInference(ctx context.Context, nvidia []gpuStats, amd []amdGPUStats, warnings *[]string) []inferenceProcess {
+	return buildInferenceProcessList(nvidia, amd)
 }
 
 func parseGPUCSV(output string) ([]gpuStats, error) {
@@ -612,7 +662,7 @@ func parseAMDProcesses(raw map[string]json.RawMessage) []amdGPUProcess {
 		name, vram, gtt := parseAMDProcess(processRaw)
 		processes = append(processes, amdGPUProcess{
 			PID:      int32(pid),
-			Provider: classifyProvider(name),
+			Provider: classifyProvider(name, ""),
 			Name:     name,
 			VRAMMiB:  vram,
 			GTTMiB:   gtt,
@@ -689,6 +739,36 @@ func amdMetricValue(raw json.RawMessage) optFloat {
 	return optFloat{}
 }
 
+// processCmdline reads the full command line for a PID from /proc.
+func processCmdline(pid int32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return ""
+	}
+	s := strings.ReplaceAll(string(data), "\x00", " ")
+	return strings.TrimSpace(s)
+}
+
+// processContainerName resolves a PID to its container name if it's a container.
+func processContainerName(pid int32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "docker") || strings.Contains(line, "podman") {
+			for _, part := range strings.Split(line, " ") {
+				for _, prefix := range []string{"docker/", "podman/"} {
+					if strings.HasPrefix(part, prefix) {
+						return part[len(prefix):]
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
 	fields := "gpu_uuid,pid,process_name,used_memory"
 	stdout, stderr, err := runCommand(ctx, "nvidia-smi", "--query-compute-apps="+fields, "--format=csv,noheader,nounits")
@@ -717,11 +797,17 @@ func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
 		}
 
 		processName := strings.TrimSpace(row[2])
+		cmdline := processCmdline(int32(pid64))
+		containerName := processContainerName(int32(pid64))
+		displayName := processName
+		if containerName != "" {
+			displayName = containerName
+		}
 		processes = append(processes, gpuProcess{
 			GPUUUID:      strings.TrimSpace(row[0]),
 			PID:          int32(pid64),
-			Provider:     classifyProvider(processName),
-			Name:         processName,
+			Provider:     classifyProvider(processName, cmdline),
+			Name:         displayName,
 			UsedMemoryMB: parseOptFloat(row[3]),
 		})
 	}
@@ -1192,6 +1278,9 @@ func renderSystem(s snapshot, width int) string {
 	ramBody := renderMemory(s.Memory, width)
 
 	body := sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("RAM") + "\n" + ramBody
+	if s.Swap.OK {
+		body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
+	}
 	return renderCard("System", body, width)
 }
 
@@ -1222,6 +1311,20 @@ func renderMemory(stats memoryStats, width int) string {
 	innerWidth := maxInt(20, width-6)
 	used := fmt.Sprintf("%s / %s (available %s)", humanBytes(stats.Used), humanBytes(stats.Total), humanBytes(stats.Available))
 	return metricLine("RAM", stats.Percent, fmt.Sprintf("%.1f%%  %s", stats.Percent, used), innerWidth)
+}
+
+func renderSwap(stats swapMemoryStats, width int) string {
+	if !stats.OK {
+		return mutedStyle.Render("Swap metrics unavailable.")
+	}
+
+	innerWidth := maxInt(20, width-6)
+	used := fmt.Sprintf("%s / %s", humanBytes(stats.Used), humanBytes(stats.Total))
+	percent := 0.0
+	if stats.Total > 0 {
+		percent = float64(stats.Used) / float64(stats.Total) * 100
+	}
+	return metricLine("Swap", percent, fmt.Sprintf("%.1f%%  %s", percent, used), innerWidth)
 }
 
 func llmProcesses(processes []gpuProcess) []gpuProcess {

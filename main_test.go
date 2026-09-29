@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -91,8 +90,8 @@ func TestClassifyProvider(t *testing.T) {
 		{"unknown-binary-1234", ""},
 	}
 	for _, c := range cases {
-		if got := classifyProvider(c.in); got != c.want {
-			t.Fatalf("classifyProvider(%q) = %q, want %q", c.in, got, c.want)
+		if got := classifyProvider(c.in, ""); got != c.want {
+			t.Fatalf("classifyProvider(%q, %q) = %q, want %q", c.in, "", got, c.want)
 		}
 	}
 }
@@ -112,7 +111,7 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
 	}
 
-	inference := collectInference(context.Background(), &[]string{})
+	inference := buildInferenceProcessList(nil, gpus)
 	if len(inference) != 2 {
 		t.Fatalf("got %d inference processes, want 2", len(inference))
 	}
