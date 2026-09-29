@@ -23,7 +23,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
+	netio "github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
 )
 
@@ -44,8 +46,11 @@ type snapshot struct {
 	CPU              cpuStats
 	Memory           memoryStats
 	Swap             swapMemoryStats
+	Thermal          thermalStats
 	GPUs             []gpuStats
 	AMDGPUs          []amdGPUStats
+	Disk             diskStats
+	Net              netStats
 	Inference        []inferenceProcess
 	OllamaProcesses  []ollamaProcess
 	OllamaPS         commandOutput
@@ -82,6 +87,45 @@ type swapMemoryStats struct {
 	Total uint64
 }
 
+type thermalStats struct {
+	OK    bool
+	Zone  []thermalZone
+	Total optFloat
+}
+
+type thermalZone struct {
+	Index       int
+	Type        string
+	Temperature optFloat
+}
+
+type diskStats struct {
+	OK       bool
+	Devices  []diskDeviceStats
+	Warnings []string
+}
+
+type diskDeviceStats struct {
+	Name       string
+	ReadBytes  uint64
+	WriteBytes uint64
+	ReadIOss   uint64
+	WriteIOSS  uint64
+}
+
+type netStats struct {
+	OK      bool
+	Devices []netDeviceStats
+}
+
+type netDeviceStats struct {
+	Name        string
+	BytesSent   uint64
+	BytesRecv   uint64
+	PacketsSent uint64
+	PacketsRecv uint64
+}
+
 type gpuStats struct {
 	Index       string
 	UUID        string
@@ -113,6 +157,7 @@ type amdGPUStats struct {
 	MemoryTotal optFloat
 	Temperature optFloat
 	PowerDraw   optFloat
+	FanPercent  optFloat
 	Processes   []amdGPUProcess
 }
 
@@ -405,6 +450,9 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.CPU = collectCPU(ctx, &s.Warnings)
 	s.Memory = collectMemory(ctx, &s.Warnings)
 	s.Swap = collectSwap(ctx, &s.Warnings)
+	s.Thermal = collectThermal(ctx, &s.Warnings)
+	s.Disk = collectDisk(ctx, &s.Warnings)
+	s.Net = collectNet(ctx, &s.Warnings)
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
 	s.Inference = collectInference(ctx, s.GPUs, s.AMDGPUs, &s.Warnings)
@@ -466,6 +514,111 @@ func collectSwap(ctx context.Context, warnings *[]string) swapMemoryStats {
 		Used:  vm.Used,
 		Total: vm.Total,
 	}
+}
+
+func collectThermal(ctx context.Context, warnings *[]string) thermalStats {
+	stats := thermalStats{}
+	thermalPath := "/sys/class/thermal"
+
+	dir, err := os.Open(thermalPath)
+	if err != nil {
+		addWarning(warnings, "thermal sensors unavailable")
+		return stats
+	}
+	defer dir.Close()
+
+	entries, err := dir.ReadDir(-1)
+	if err != nil || len(entries) == 0 {
+		addWarning(warnings, "thermal sensors unavailable")
+		return stats
+	}
+
+	stats.OK = true
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		zonePath := thermalPath + "/" + entry.Name()
+		typeFile := zonePath + "/type"
+		tempFile := zonePath + "/temp"
+
+		typeData, err := os.ReadFile(typeFile)
+		if err != nil {
+			continue
+		}
+		zoneType := strings.TrimSpace(string(typeData))
+		if zoneType == "" {
+			continue
+		}
+
+		tempData, err := os.ReadFile(tempFile)
+		if err != nil {
+			continue
+		}
+		var tempMilli float64
+		_, err = fmt.Sscanf(string(tempData), "%f", &tempMilli)
+		if err != nil {
+			continue
+		}
+
+		tempCelsius := tempMilli / 1000.0
+		stats.Zone = append(stats.Zone, thermalZone{
+			Index:       len(stats.Zone),
+			Type:        fmt.Sprintf("%s (%s)", zoneType, entry.Name()),
+			Temperature: optFloat{Value: tempCelsius, OK: true},
+		})
+		if tempCelsius > stats.Total.Value {
+			stats.Total = optFloat{Value: tempCelsius, OK: true}
+		}
+	}
+
+	if len(stats.Zone) == 0 {
+		stats.OK = false
+	}
+	return stats
+}
+
+func collectDisk(ctx context.Context, warnings *[]string) diskStats {
+	stats := diskStats{}
+	devices, err := disk.IOCountersWithContext(ctx)
+	if err != nil {
+		addWarning(warnings, "disk I/O metrics unavailable: "+cleanError(err.Error()))
+		return stats
+	}
+	stats.OK = true
+	for name, dev := range devices {
+		stats.Devices = append(stats.Devices, diskDeviceStats{
+			Name:       name,
+			ReadBytes:  dev.ReadBytes,
+			WriteBytes: dev.WriteBytes,
+			ReadIOss:   dev.ReadCount,
+			WriteIOSS:  dev.WriteCount,
+		})
+	}
+	if len(stats.Devices) == 0 {
+		stats.OK = false
+	}
+	return stats
+}
+
+func collectNet(ctx context.Context, warnings *[]string) netStats {
+	stats := netStats{}
+	devices, err := netio.IOCountersWithContext(ctx, false)
+	if err != nil {
+		addWarning(warnings, "network I/O metrics unavailable: "+cleanError(err.Error()))
+		return stats
+	}
+	stats.OK = true
+	for _, dev := range devices {
+		stats.Devices = append(stats.Devices, netDeviceStats{
+			Name:        dev.Name,
+			BytesSent:   dev.BytesSent,
+			BytesRecv:   dev.BytesRecv,
+			PacketsSent: dev.PacketsSent,
+			PacketsRecv: dev.PacketsRecv,
+		})
+	}
+	return stats
 }
 
 func collectNVIDIA(ctx context.Context, warnings *[]string) []gpuStats {
@@ -640,6 +793,7 @@ func parseAMDJSON(output string) ([]amdGPUStats, error) {
 			MemoryTotal: amdMetric(device.VRAM, "Total VRAM"),
 			Temperature: firstAMDMetric(device.Sensors, "Junction Temperature", "Edge Temperature"),
 			PowerDraw:   firstAMDMetric(device.Sensors, "Average Power", "GFX Power", "Input Power"),
+			FanPercent:  firstAMDMetric(device.Sensors, "Fan Speed", "Fan"),
 			Processes:   parseAMDProcesses(device.FDInfo),
 		}
 		if gpu.Name == "" {
@@ -1244,6 +1398,8 @@ func renderContent(s snapshot, width int) string {
 		renderInference(s.Inference, width),
 		renderGPUSection(s.GPUs, width),
 		renderAMDSection(s.AMDGPUs, width),
+		renderDiskCard(s.Disk, width),
+		renderNetCard(s.Net, width),
 		renderUnslothStudio(s.UnslothStudio, width),
 		renderOllamaProcesses(s.OllamaProcesses, width),
 		renderOllamaPS(s.OllamaPS, width),
@@ -1280,6 +1436,9 @@ func renderSystem(s snapshot, width int) string {
 	body := sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("RAM") + "\n" + ramBody
 	if s.Swap.OK {
 		body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
+	}
+	if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
+		body += "\n\n" + sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
 	}
 	return renderCard("System", body, width)
 }
@@ -1325,6 +1484,117 @@ func renderSwap(stats swapMemoryStats, width int) string {
 		percent = float64(stats.Used) / float64(stats.Total) * 100
 	}
 	return metricLine("Swap", percent, fmt.Sprintf("%.1f%%  %s", percent, used), innerWidth)
+}
+
+func renderThermal(stats thermalStats, width int) string {
+	if !stats.OK {
+		return mutedStyle.Render("Thermal sensors unavailable.")
+	}
+
+	innerWidth := maxInt(20, width-6)
+	var lines []string
+
+	if stats.Total.OK {
+		degrees := fmt.Sprintf("%.0f\u00b0C", stats.Total.Value)
+		var tempPercent float64
+		if stats.Total.Value > 100 {
+			tempPercent = 100.0
+		} else {
+			tempPercent = stats.Total.Value
+		}
+		lines = append(lines, metricLine("Overall", tempPercent, degrees, innerWidth))
+	}
+
+	if stats.Total.OK && len(stats.Zone) > 0 {
+		lines = append(lines, "")
+	}
+	for _, z := range stats.Zone {
+		if z.Temperature.OK {
+			label := z.Type
+			if z.Index > 0 {
+				label = fmt.Sprintf("Zone %d: %s", z.Index, z.Type)
+			}
+			lines = append(lines, fmt.Sprintf("  %-30s %s", label, fmt.Sprintf("%.0f\u00b0C", z.Temperature.Value)))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func renderDiskCard(stats diskStats, width int) string {
+	if !stats.OK {
+		return ""
+	}
+	var text string
+	if len(stats.Devices) == 0 {
+		text = mutedStyle.Render("Disk I/O metrics unavailable.")
+	} else {
+		text = renderDisk(stats, width)
+	}
+	return renderCard("Disk I/O", text, width)
+}
+
+func renderDisk(stats diskStats, width int) string {
+	innerWidth := maxInt(20, width-6)
+	var lines []string
+
+	barWidth := maxInt(10, innerWidth-70)
+
+	for _, dev := range stats.Devices {
+		readStr := humanBytes(dev.ReadBytes)
+		writeStr := humanBytes(dev.WriteBytes)
+
+		totalIO := float64(dev.ReadIOss + dev.WriteIOSS)
+		if totalIO > 0 {
+			pct := float64(dev.WriteIOSS) / float64(totalIO) * 100
+			lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
+			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", renderBar(pct, barWidth), readStr, writeStr))
+		} else {
+			lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
+			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", barEmptyStyle.Render(strings.Repeat("-", barWidth)), readStr, writeStr))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func renderNetCard(stats netStats, width int) string {
+	if !stats.OK {
+		return ""
+	}
+	var text string
+	if len(stats.Devices) == 0 {
+		text = mutedStyle.Render("Network I/O metrics unavailable.")
+	} else {
+		text = renderNet(stats, width)
+	}
+	return renderCard("Network I/O", text, width)
+}
+
+func renderNet(stats netStats, width int) string {
+	if !stats.OK {
+		return mutedStyle.Render("Network I/O metrics unavailable.")
+	}
+
+	innerWidth := maxInt(20, width-6)
+	var lines []string
+
+	for _, dev := range stats.Devices {
+		barWidth := maxInt(10, innerWidth-60)
+		totalBytes := dev.BytesSent + dev.BytesRecv
+		pct := float64(dev.BytesRecv) / float64(totalBytes) * 100
+		if totalBytes > 0 && pct > 100 {
+			pct = 100
+		}
+		bar := renderBar(pct, barWidth)
+		sentStr := humanBytes(dev.BytesSent)
+		recvStr := humanBytes(dev.BytesRecv)
+
+		lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
+		lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", bar, recvStr, sentStr))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func llmProcesses(processes []gpuProcess) []gpuProcess {
@@ -1513,7 +1783,7 @@ func renderAMDSection(gpus []amdGPUStats, width int) string {
 		}
 		vramValue := fmt.Sprintf("%s / %s (%.1f%%)", optMemoryString(gpu.MemoryUsed), optMemoryString(gpu.MemoryTotal), vramPercent)
 		lines = append(lines, metricLine("VRAM", vramPercent, vramValue, innerWidth))
-		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})))
+		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})+"   Fan "+optPercentString(gpu.FanPercent)))
 
 		llm := llmAMDProcesses(gpu.Processes)
 		other := otherAMDProcesses(gpu.Processes)
