@@ -343,6 +343,8 @@ var (
 func main() {
 	interval := flag.Duration("interval", defaultInterval, "refresh interval such as 500ms, 1s, or 2s")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	exportTarget := flag.String("export", "", "export target: stdout, json, csv, or file path")
+	onceMode := flag.Bool("once", false, "single snapshot and exit")
 	flag.IntVar(&studioPort, "unsloth-port", 8888, "Unsloth Studio API port")
 	flag.StringVar(&studioToken, "unsloth-token", "", "Unsloth Studio API Bearer token (or set UNSLOTH_STUDIO_TOKEN)")
 	flag.Parse()
@@ -350,6 +352,9 @@ func main() {
 		fmt.Println("ontop " + version)
 		return
 	}
+
+	// Support env var override for Unsloth Studio URL before import.
+	_ = os.Getenv("UNSLOTH_STUDIO_URL")
 
 	envInterval := os.Getenv("ONTOP_INTERVAL")
 	if envInterval != "" {
@@ -368,11 +373,77 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *exportTarget != "" || *onceMode {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		s := collectMetrics(ctx)
+
+		if *onceMode && len(s.GPUs) > 0 {
+			// Second collection to populate sparklines with real delta data.
+			<-time.After(500 * time.Millisecond)
+			s = collectMetrics(ctx)
+		}
+
+		switch *exportTarget {
+		case "json":
+			bytes, err := json.MarshalIndent(s, "", "  ")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to marshal JSON: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(bytes))
+		case "csv":
+			writeCSV(s)
+			if *onceMode || *exportTarget == "" {
+				if *onceMode && *exportTarget != "" {
+					return
+				}
+			}
+		default:
+			if len(*exportTarget) > 0 && *exportTarget != "stdout" {
+				f, err := os.Create(*exportTarget)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to create output file: %v\n", err)
+					os.Exit(1)
+				}
+				defer f.Close()
+				_, _ = f.WriteString(renderContent(s, 200, nil))
+				fmt.Printf("exported to %s\n", *exportTarget)
+				return
+			}
+			fmt.Println(renderContent(s, 200, nil))
+		}
+		return
+	}
+
 	p := tea.NewProgram(newModel(*interval, config{}), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to run dashboard: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func writeCSV(s snapshot) {
+	w := csv.NewWriter(os.Stdout)
+	defer w.Flush()
+
+	w.Write([]string{"timestamp", "cpu_total", "cpu_per_core", "ram_used", "ram_total", "ram_percent", "swap_used", "swap_total"})
+
+	cores := make([]string, len(s.CPU.PerCore))
+	for i, v := range s.CPU.PerCore {
+		cores[i] = fmt.Sprintf("%.1f%%", v)
+	}
+	w.Write([]string{
+		s.CollectedAt.Format(time.RFC3339),
+		fmt.Sprintf("%.1f", s.CPU.Total),
+		strings.Join(cores, ";"),
+		fmt.Sprintf("%d", s.Memory.Used),
+		fmt.Sprintf("%d", s.Memory.Total),
+		fmt.Sprintf("%.1f", s.Memory.Percent),
+		fmt.Sprintf("%d", s.Swap.Used),
+		fmt.Sprintf("%d", s.Swap.Total),
+	})
 }
 
 func newModel(interval time.Duration, cfg config) model {
@@ -1263,20 +1334,49 @@ func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudio
 
 func discoverStudioBase(ctx context.Context) string {
 	if configured := strings.TrimRight(strings.TrimSpace(os.Getenv("UNSLOTH_STUDIO_URL")), "/"); configured != "" {
-		if studioHealthOK(ctx, configured) {
+		probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		if studioHealthOK(probeCtx, configured) {
 			return configured
 		}
 		return ""
 	}
 
+	if detected := detectUnslothProcesses(); detected != "" {
+		return detected
+	}
+
 	ports := []int{studioPort}
-	if studioPort == 8888 {
-		ports = append(ports, 8000, 3000, 8080)
+	if studioPort == 8888 || studioPort == -1 {
+		ports = []int{8888, 8000, 3000, 8080}
 	}
 	for _, port := range ports {
 		base := fmt.Sprintf("http://127.0.0.1:%d", port)
 		if studioHealthOK(ctx, base) {
 			return base
+		}
+	}
+	return ""
+}
+
+func detectUnslothProcesses() string {
+	procs, err := process.Processes()
+	if err != nil {
+		return ""
+	}
+	for _, p := range procs {
+		name, _ := p.Name()
+		if strings.Contains(strings.ToLower(name), "unsloth") {
+			cmdline, _ := p.Cmdline()
+			for _, arg := range strings.Fields(cmdline) {
+				if strings.HasPrefix(arg, "--port=") {
+					port := strings.TrimPrefix(arg, "--port=")
+					if portNum, err := strconv.Atoi(port); err == nil {
+						return fmt.Sprintf("http://localhost:%d", portNum)
+					}
+				}
+			}
+			return "http://localhost:8888"
 		}
 	}
 	return ""
