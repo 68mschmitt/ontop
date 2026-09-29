@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +56,7 @@ type snapshot struct {
 	OllamaProcesses  []ollamaProcess
 	OllamaPS         commandOutput
 	UnslothStudio    unslothStudioStats
+	GPUSparkline     map[string][]float64
 	Warnings         []string
 	CollectionMillis int64
 }
@@ -138,6 +140,10 @@ type gpuStats struct {
 	PowerLimit  optFloat
 	FanPercent  optFloat
 	Processes   []gpuProcess
+	UtilTrend   string
+	UtilDelta   float64
+	VRAMTrend   string
+	VRAMDelta   float64
 }
 
 type gpuProcess struct {
@@ -159,6 +165,8 @@ type amdGPUStats struct {
 	PowerDraw   optFloat
 	FanPercent  optFloat
 	Processes   []amdGPUProcess
+	UtilTrend   string
+	UtilDelta   float64
 }
 
 type amdGPUProcess struct {
@@ -226,6 +234,8 @@ type unslothStudioStats struct {
 
 // classifyProvider maps a process name and optional cmdline to a specific
 // provider label. Returns "" for unrecognized names (rendered as "other").
+var prevSnapshot snapshot
+
 func classifyProvider(name string, cmdline string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	cmdLower := strings.ToLower(strings.TrimSpace(cmdline))
@@ -453,13 +463,16 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.Thermal = collectThermal(ctx, &s.Warnings)
 	s.Disk = collectDisk(ctx, &s.Warnings)
 	s.Net = collectNet(ctx, &s.Warnings)
-	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
-	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
+	s.GPUs = collectNVIDIA(ctx, &s.Warnings, prevSnapshot.GPUs)
+	s.AMDGPUs = collectAMD(ctx, &s.Warnings, prevSnapshot.AMDGPUs)
+	s.GPUSparkline = mergeGPUSparkline(prevSnapshot.GPUSparkline, s.GPUs)
 	s.Inference = collectInference(ctx, s.GPUs, s.AMDGPUs, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
 	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
 	s.CollectionMillis = time.Since(started).Milliseconds()
+
+	prevSnapshot = s
 
 	return s
 }
@@ -621,7 +634,7 @@ func collectNet(ctx context.Context, warnings *[]string) netStats {
 	return stats
 }
 
-func collectNVIDIA(ctx context.Context, warnings *[]string) []gpuStats {
+func collectNVIDIA(ctx context.Context, warnings *[]string, prevGpus []gpuStats) []gpuStats {
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
 		return nil
 	}
@@ -654,25 +667,41 @@ func collectNVIDIA(ctx context.Context, warnings *[]string) []gpuStats {
 		}
 	}
 
+	addGPUUtilDelta(prevGpus, gpus)
+	addVRAMDeltas(prevGpus, gpus)
+
 	return gpus
 }
 
-func collectAMD(ctx context.Context, warnings *[]string) []amdGPUStats {
+func collectAMD(ctx context.Context, warnings *[]string, prevGpus []amdGPUStats) []amdGPUStats {
 	if _, err := exec.LookPath("amdgpu_top"); err != nil {
-		return nil
+		stats := collectAMDFromSysfs(warnings)
+		if len(stats) > 0 {
+			addAMDUtilDelta(nil, stats)
+		}
+		return stats
 	}
 
 	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
 	if err != nil {
 		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
-		return nil
+		stats := collectAMDFromSysfs(warnings)
+		if len(stats) > 0 {
+			addAMDUtilDelta(prevGpus, stats)
+		}
+		return stats
 	}
 
 	gpus, err := parseAMDJSON(stdout)
 	if err != nil {
 		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
-		return nil
+		stats := collectAMDFromSysfs(warnings)
+		if len(stats) > 0 {
+			addAMDUtilDelta(prevGpus, stats)
+		}
+		return stats
 	}
+	addAMDUtilDelta(prevGpus, gpus)
 	return gpus
 }
 
@@ -1038,13 +1067,48 @@ func collectOllamaPS(ctx context.Context) commandOutput {
 		return commandOutput{Missing: true, Error: "ollama command not found"}
 	}
 
-	stdout, stderr, err := runCommand(ctx, "ollama", "ps")
-	if err != nil {
+	stdout, stderr, err := runCommand(ctx, "ollama", "ps", "--json")
+	if err == nil {
+		output := strings.TrimSpace(stdout)
+		models := parseOllamaPSJSON(output)
+		return commandOutput{Output: output, Models: models}
+	}
+
+	textStdout, _, textErr := runCommand(ctx, "ollama", "ps")
+	if textErr != nil {
 		return commandOutput{Error: cleanCommandError(err, stderr)}
 	}
 
-	output := strings.TrimSpace(stdout)
+	output := strings.TrimSpace(textStdout)
 	return commandOutput{Output: output, Models: parseOllamaPS(output)}
+}
+
+func parseOllamaPSJSON(output string) []ollamaModel {
+	var models []ollamaModel
+
+	type ollamaLine struct {
+		Name         string  `json:"name"`
+		Id           string  `json:"id"`
+		Size         float64 `json:"size"`
+		SizeVRAM     float64 `json:"size_vram"`
+		TransferRate string  `json:"transfer_rate"`
+	}
+
+	var lines []ollamaLine
+	if err := json.Unmarshal([]byte(output), &lines); err != nil {
+		return nil
+	}
+
+	for _, l := range lines {
+		sizeGB := l.Size / 1e9
+		models = append(models, ollamaModel{
+			Name: l.Name,
+			ID:   l.Id,
+			Size: fmt.Sprintf("%.1f GB", sizeGB),
+		})
+	}
+
+	return models
 }
 
 func parseOllamaPS(output string) []ollamaModel {
@@ -1396,7 +1460,7 @@ func renderContent(s snapshot, width int) string {
 	for _, section := range []string{
 		renderSystem(s, width),
 		renderInference(s.Inference, width),
-		renderGPUSection(s.GPUs, width),
+		renderGPUSection(s.GPUs, s.GPUSparkline, width),
 		renderAMDSection(s.AMDGPUs, width),
 		renderDiskCard(s.Disk, width),
 		renderNetCard(s.Net, width),
@@ -1686,7 +1750,7 @@ func renderInferenceTable(processes []inferenceProcess, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderGPUSection(gpus []gpuStats, width int) string {
+func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int) string {
 	if len(gpus) == 0 {
 		return ""
 	}
@@ -1703,14 +1767,30 @@ func renderGPUSection(gpus []gpuStats, width int) string {
 			title += "  " + gpu.Name
 		}
 		lines = append(lines, valueStyle.Render(fitText(title, innerWidth)))
-		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), optPercentString(gpu.UtilPercent), innerWidth))
+
+		utilStr := optPercentString(gpu.UtilPercent)
+		if gpu.UtilTrend != "" {
+			utilStr = gpu.UtilTrend + " " + utilStr
+		}
+		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
+
+		if history := sparkline[gpu.Index]; len(history) > 0 {
+			lines = append(lines, mutedStyle.Render("trend: "+renderSparkline(history, minInt(innerWidth-10, len(history)))))
+		}
 
 		vramPercent := 0.0
 		if gpu.MemoryUsed.OK && gpu.MemoryTotal.OK && gpu.MemoryTotal.Value > 0 {
 			vramPercent = gpu.MemoryUsed.Value / gpu.MemoryTotal.Value * 100
 		}
-		vramValue := fmt.Sprintf("%s / %s (%.1f%%)", optMemoryString(gpu.MemoryUsed), optMemoryString(gpu.MemoryTotal), vramPercent)
-		lines = append(lines, metricLine("VRAM", vramPercent, vramValue, innerWidth))
+		vramStr := fmt.Sprintf("%s / %s (%.1f%%)", optMemoryString(gpu.MemoryUsed), optMemoryString(gpu.MemoryTotal), vramPercent)
+		if gpu.VRAMTrend != "" && gpu.VRAMDelta != 0 {
+			sign := ""
+			if gpu.VRAMDelta > 0 {
+				sign = "+"
+			}
+			vramStr = gpu.VRAMTrend + " " + sign + humanMiB(gpu.VRAMDelta) + "  " + vramStr
+		}
+		lines = append(lines, metricLine("VRAM", vramPercent, vramStr, innerWidth))
 
 		details := []string{
 			"Temp " + optTemperatureString(gpu.Temperature),
@@ -1775,7 +1855,12 @@ func renderAMDSection(gpus []amdGPUStats, width int) string {
 			title += "  " + gpu.PCI
 		}
 		lines = append(lines, valueStyle.Render(fitText(title, innerWidth)))
-		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), optPercentString(gpu.UtilPercent), innerWidth))
+
+		utilStr := optPercentString(gpu.UtilPercent)
+		if gpu.UtilTrend != "" {
+			utilStr = gpu.UtilTrend + " " + utilStr
+		}
+		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
 
 		vramPercent := 0.0
 		if gpu.MemoryUsed.OK && gpu.MemoryTotal.OK && gpu.MemoryTotal.Value > 0 {
@@ -2318,4 +2403,168 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func addGPUUtilDelta(prev []gpuStats, new []gpuStats) {
+	for i := range new {
+		if i < len(prev) && prev[i].UtilPercent.OK && new[i].UtilPercent.OK {
+			delta := new[i].UtilPercent.Value - prev[i].UtilPercent.Value
+			new[i].UtilDelta = delta
+			if delta > 2 {
+				new[i].UtilTrend = "▲"
+			} else if delta < -2 {
+				new[i].UtilTrend = "▼"
+			} else {
+				new[i].UtilTrend = "-"
+			}
+		}
+	}
+}
+
+func addVRAMDeltas(prev []gpuStats, new []gpuStats) {
+	for i := range new {
+		if i < len(prev) && prev[i].MemoryUsed.OK && new[i].MemoryUsed.OK {
+			delta := new[i].MemoryUsed.Value - prev[i].MemoryUsed.Value
+			new[i].VRAMDelta = delta
+			if delta > 100 {
+				new[i].VRAMTrend = "▲"
+			} else if delta < -100 {
+				new[i].VRAMTrend = "▼"
+			} else {
+				new[i].VRAMTrend = "-"
+			}
+		}
+	}
+}
+
+func addAMDUtilDelta(prev []amdGPUStats, new []amdGPUStats) {
+	for i := range new {
+		if i < len(prev) && prev[i].UtilPercent.OK && new[i].UtilPercent.OK {
+			delta := new[i].UtilPercent.Value - prev[i].UtilPercent.Value
+			new[i].UtilDelta = delta
+			if delta > 2 {
+				new[i].UtilTrend = "▲"
+			} else if delta < -2 {
+				new[i].UtilTrend = "▼"
+			} else {
+				new[i].UtilTrend = "-"
+			}
+		}
+	}
+}
+
+func mergeGPUSparkline(prev map[string][]float64, new []gpuStats) map[string][]float64 {
+	result := make(map[string][]float64)
+
+	for k, v := range prev {
+		if len(v) > 0 {
+			result[k] = v
+		}
+	}
+
+	for _, gpu := range new {
+		if gpu.UtilPercent.OK {
+			history := result[gpu.Index]
+			if len(history) == 0 {
+				history = append(history, 0)
+			}
+			history = append(history, gpu.UtilPercent.Value)
+			if len(history) > 30 {
+				history = history[1:]
+			}
+			result[gpu.Index] = history
+		}
+	}
+
+	return result
+}
+
+func renderSparkline(values []float64, width int) string {
+	if len(values) == 0 {
+		return strings.Repeat(".", width)
+	}
+
+	chars := "▁▂▃▄▅▆▇█"
+	maxVal := 0.0
+	for _, v := range values {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+
+	var result strings.Builder
+	step := float64(len(values)) / float64(width)
+
+	for i := 0; i < width && i < len(values); i++ {
+		idx := int(float64(i) / step)
+		if idx >= len(values) {
+			idx = len(values) - 1
+		}
+		level := int(values[idx] / 100.0 * 8)
+		level = clampInt(level, 0, 7)
+		result.WriteByte(chars[level])
+	}
+
+	return result.String()
+}
+
+func collectAMDFromSysfs(warnings *[]string) []amdGPUStats {
+	stats := make([]amdGPUStats, 0)
+
+	dirEntries, err := os.ReadDir("/sys/class/drm")
+	if err != nil {
+		addWarning(warnings, "AMD GPU sysfs unavailable: "+cleanError(err.Error()))
+		return stats
+	}
+
+	for _, d := range dirEntries {
+		if !d.IsDir() || !strings.HasPrefix(d.Name(), "card") {
+			continue
+		}
+
+		cardDir := "/sys/class/drm/" + d.Name()
+		deviceDir := cardDir + "/device"
+
+		if _, err := os.Stat(deviceDir); os.IsNotExist(err) {
+			continue
+		}
+
+		gpu := amdGPUStats{
+			Index: strings.TrimPrefix(d.Name(), "card"),
+			Name:  "AMD GPU",
+		}
+
+		if pci, err := os.Readlink(deviceDir); err == nil {
+			gpu.PCI = filepath.Base(pci)
+		}
+
+		hwmonDir := deviceDir + "/hwmon"
+		hwmonEntries, err := os.ReadDir(hwmonDir)
+		if err == nil {
+			for _, e := range hwmonEntries {
+				if !strings.HasPrefix(e.Name(), "hwmon") {
+					continue
+				}
+				tempFile := hwmonDir + "/" + e.Name() + "/temp1_input"
+				if temp, err := os.ReadFile(tempFile); err == nil {
+					if val, err := strconv.ParseFloat(strings.TrimSpace(string(temp)), 64); err == nil {
+						if val > 0 {
+							gpu.Temperature = optFloat{Value: val / 1000.0, OK: true}
+						}
+					}
+				}
+			}
+		}
+
+		stats = append(stats, gpu)
+	}
+
+	return stats
 }

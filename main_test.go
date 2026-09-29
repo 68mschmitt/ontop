@@ -167,7 +167,7 @@ func TestRenderGPUSectionGrouping(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, 120)
+	content := renderGPUSection(gpus, nil, 120)
 	if !strings.Contains(content, "NVIDIA GPU") {
 		t.Fatalf("expected NVIDIA card: %q", content)
 	}
@@ -190,7 +190,7 @@ func TestRenderGPUSectionLLMOnly(t *testing.T) {
 		},
 	}
 
-	content := renderGPUSection(gpus, 120)
+	content := renderGPUSection(gpus, nil, 120)
 	if !strings.Contains(content, "NVIDIA GPU") || !strings.Contains(content, "LLM Processes") {
 		t.Fatalf("expected NVIDIA card with LLM table only: %q", content)
 	}
