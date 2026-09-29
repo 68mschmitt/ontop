@@ -385,7 +385,7 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.Memory = collectMemory(ctx, &s.Warnings)
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
-	s.Inference = collectInference(ctx, &s.Warnings)
+	s.Inference = buildInferenceProcessList(s.GPUs, s.AMDGPUs)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
 	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
@@ -487,25 +487,21 @@ func collectAMD(ctx context.Context, warnings *[]string) []amdGPUStats {
 	return gpus
 }
 
-func collectInference(ctx context.Context, warnings *[]string) []inferenceProcess {
-	if _, err := exec.LookPath("amdgpu_top"); err != nil {
-		return nil
-	}
-
-	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
-	if err != nil {
-		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
-		return nil
-	}
-
-	gpus, err := parseAMDJSON(stdout)
-	if err != nil {
-		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
-		return nil
-	}
-
+func buildInferenceProcessList(nvidia []gpuStats, amd []amdGPUStats) []inferenceProcess {
 	inference := make([]inferenceProcess, 0)
-	for _, gpu := range gpus {
+	for _, gpu := range nvidia {
+		for _, p := range gpu.Processes {
+			if p.UsedMemoryMB.OK {
+				inference = append(inference, inferenceProcess{
+					PID:      p.PID,
+					Provider: p.Provider,
+					Name:     p.Name,
+					VRAMMiB:  p.UsedMemoryMB,
+				})
+			}
+		}
+	}
+	for _, gpu := range amd {
 		for _, p := range gpu.Processes {
 			inference = append(inference, inferenceProcess{
 				PID:      p.PID,
@@ -516,14 +512,12 @@ func collectInference(ctx context.Context, warnings *[]string) []inferenceProces
 			})
 		}
 	}
-
 	sort.SliceStable(inference, func(i, j int) bool {
 		if inference[i].VRAMMiB.OK != inference[j].VRAMMiB.OK {
 			return inference[i].VRAMMiB.OK
 		}
 		return inference[i].VRAMMiB.Value > inference[j].VRAMMiB.Value
 	})
-
 	return inference
 }
 
@@ -1256,9 +1250,11 @@ func renderInference(inference []inferenceProcess, width int) string {
 	other := otherProcessesFromInference(inference)
 
 	if len(llm) > 0 {
+		lines = append(lines, labelStyle.Render("LLM Processes"))
 		lines = append(lines, renderInferenceTable(llm, innerWidth))
 	}
 	if len(other) > 0 {
+		lines = append(lines, labelStyle.Render("Other Processes"))
 		lines = append(lines, renderInferenceTable(other, innerWidth))
 	}
 
@@ -1348,9 +1344,11 @@ func renderGPUSection(gpus []gpuStats, width int) string {
 		other := otherProcesses(gpu.Processes)
 
 		if len(llm) > 0 {
+			lines = append(lines, labelStyle.Render("LLM Processes"))
 			lines = append(lines, renderGPUProcessTable(llm, innerWidth))
 		}
 		if len(other) > 0 {
+			lines = append(lines, labelStyle.Render("Other Processes"))
 			lines = append(lines, renderGPUProcessTable(other, innerWidth))
 		}
 	}

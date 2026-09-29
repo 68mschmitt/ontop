@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -112,18 +111,21 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
 	}
 
-	inference := collectInference(context.Background(), &[]string{})
+	inference := buildInferenceProcessList(nil, gpus)
 	if len(inference) != 2 {
 		t.Fatalf("got %d inference processes, want 2", len(inference))
 	}
 	if !inference[0].VRAMMiB.OK || inference[0].VRAMMiB.Value != 12288 {
 		t.Fatalf("expected highest VRAM first: %+v", inference[0])
 	}
-	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
-		t.Fatalf("unexpected providers/order: %+v", inference)
+	if !inference[1].VRAMMiB.OK || inference[1].VRAMMiB.Value != 4096 {
+		t.Fatalf("expected second VRAM correct: %+v", inference[1])
 	}
 	if inference[0].PID != 200 || inference[1].PID != 100 {
 		t.Fatalf("unexpected PIDs/order: %+v", inference)
+	}
+	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
+		t.Fatalf("unexpected providers/order: %+v", inference)
 	}
 }
 
@@ -159,8 +161,8 @@ func TestRenderInferenceGrouping(t *testing.T) {
 func TestRenderGPUSectionGrouping(t *testing.T) {
 	gpus := []gpuStats{
 		{
-			Name:   "Test GPU",
-			Index:  "0",
+			Name:  "Test GPU",
+			Index: "0",
 			Processes: []gpuProcess{
 				{GPUUUID: "uuid-0", PID: 200, Provider: "vLLM", Name: "vllm", UsedMemoryMB: optFloat{Value: 8192, OK: true}},
 				{GPUUUID: "uuid-0", PID: 50, Name: "chrome", UsedMemoryMB: optFloat{Value: 1024, OK: true}},
@@ -183,8 +185,8 @@ func TestRenderGPUSectionGrouping(t *testing.T) {
 func TestRenderGPUSectionLLMOnly(t *testing.T) {
 	gpus := []gpuStats{
 		{
-			Name:   "Test GPU",
-			Index:  "0",
+			Name:  "Test GPU",
+			Index: "0",
 			Processes: []gpuProcess{
 				{GPUUUID: "uuid-0", PID: 200, Provider: "vLLM", Name: "vllm", UsedMemoryMB: optFloat{Value: 8192, OK: true}},
 			},
@@ -210,8 +212,8 @@ func TestRenderContentOrdering(t *testing.T) {
 	content := renderContent(s, 120)
 
 	idx := func(name string) int { return strings.Index(content, name) }
-	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
+	needsAMD := idx("AMD GPU") >= 0
+	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || (needsAMD && idx("NVIDIA GPU") > idx("AMD GPU")) {
 		t.Fatalf("unexpected section ordering: %q", content)
 	}
 }
-
