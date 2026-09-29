@@ -12,12 +12,12 @@ type section interface {
 
 func makeSections(s snapshot, disabled map[string]bool) []section {
 	return []section{
+		&ollamaModelSection{snapshot: s, disabled: disabled},
 		&gpuSection{snapshot: s, disabled: disabled},
 		&amdSection{snapshot: s, disabled: disabled},
 		&memorySection{snapshot: s, disabled: disabled},
 		&unslothSection{snapshot: s, disabled: disabled},
 		&ollamaProcessSection{snapshot: s, disabled: disabled},
-		&ollamaModelSection{snapshot: s, disabled: disabled},
 		&systemSection{snapshot: s, disabled: disabled},
 		&diskSection{snapshot: s, disabled: disabled},
 		&netSection{snapshot: s, disabled: disabled},
