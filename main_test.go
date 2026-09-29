@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
 
 func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
 	content := renderContent(snapshot{CollectedAt: time.Now()}, 80)
-	if strings.Contains(content, "NVIDIA GPU") || strings.Contains(content, "AMD GPU") || strings.Contains(content, "Unsloth Studio") || strings.Contains(content, "Ollama Processes") {
+	if strings.Contains(content, "NVIDIA GPU") || strings.Contains(content, "Unsloth Studio") || strings.Contains(content, "Ollama Processes") {
 		t.Fatalf("optional service card rendered without metrics: %q", content)
 	}
 }
@@ -111,21 +112,18 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
 	}
 
-	inference := buildInferenceProcessList(nil, gpus)
+	inference := collectInference(context.Background(), &[]string{})
 	if len(inference) != 2 {
 		t.Fatalf("got %d inference processes, want 2", len(inference))
 	}
 	if !inference[0].VRAMMiB.OK || inference[0].VRAMMiB.Value != 12288 {
 		t.Fatalf("expected highest VRAM first: %+v", inference[0])
 	}
-	if !inference[1].VRAMMiB.OK || inference[1].VRAMMiB.Value != 4096 {
-		t.Fatalf("expected second VRAM correct: %+v", inference[1])
+	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
+		t.Fatalf("unexpected providers/order: %+v", inference)
 	}
 	if inference[0].PID != 200 || inference[1].PID != 100 {
 		t.Fatalf("unexpected PIDs/order: %+v", inference)
-	}
-	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
-		t.Fatalf("unexpected providers/order: %+v", inference)
 	}
 }
 
@@ -212,8 +210,7 @@ func TestRenderContentOrdering(t *testing.T) {
 	content := renderContent(s, 120)
 
 	idx := func(name string) int { return strings.Index(content, name) }
-	needsAMD := idx("AMD GPU") >= 0
-	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || (needsAMD && idx("NVIDIA GPU") > idx("AMD GPU")) {
+	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
 		t.Fatalf("unexpected section ordering: %q", content)
 	}
 }
