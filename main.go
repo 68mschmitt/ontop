@@ -1989,38 +1989,17 @@ func renderSwap(stats swapMemoryStats, width int) string {
 }
 
 func renderThermal(stats thermalStats, width int) string {
-	if !stats.OK {
-		return mutedStyle.Render("Thermal sensors unavailable.")
+	if !stats.Total.OK {
+		return ""
 	}
 
 	innerWidth := maxInt(20, width-6)
-	var lines []string
-
-	if stats.Total.OK {
-		degrees := fmt.Sprintf("%.0f\u00b0C", stats.Total.Value)
-		var tempPercent float64
-		if stats.Total.Value > 100 {
-			tempPercent = 100.0
-		} else {
-			tempPercent = stats.Total.Value
-		}
-		lines = append(lines, metricLine("Overall", tempPercent, degrees, innerWidth))
+	tempPercent := stats.Total.Value
+	if tempPercent > 100 {
+		tempPercent = 100.0
 	}
-
-	if stats.Total.OK && len(stats.Zone) > 0 {
-		lines = append(lines, "")
-	}
-	for _, z := range stats.Zone {
-		if z.Temperature.OK {
-			label := z.Type
-			if z.Index > 0 {
-				label = fmt.Sprintf("Zone %d: %s", z.Index, z.Type)
-			}
-			lines = append(lines, fmt.Sprintf("  %-30s %s", label, fmt.Sprintf("%.0f\u00b0C", z.Temperature.Value)))
-		}
-	}
-
-	return strings.Join(lines, "\n")
+	degrees := fmt.Sprintf("%.0f\u00b0C", stats.Total.Value)
+	return metricLine("Temp", tempPercent, degrees, innerWidth)
 }
 
 func renderDiskCard(stats diskStats, width int, disabledSections map[string]bool) string {
@@ -2242,16 +2221,6 @@ func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int
 		}
 		lines = append(lines, valueStyle.Render(fitText(title, innerWidth)))
 
-		utilStr := optPercentString(gpu.UtilPercent)
-		if gpu.UtilTrend != "" {
-			utilStr = gpu.UtilTrend + " " + utilStr
-		}
-		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
-
-		if history := sparkline[gpu.Index]; len(history) > 0 {
-			lines = append(lines, mutedStyle.Render("trend: "+renderSparkline(history, minInt(innerWidth-10, len(history)))))
-		}
-
 		vramPercent := 0.0
 		if gpu.MemoryUsed.OK && gpu.MemoryTotal.OK && gpu.MemoryTotal.Value > 0 {
 			vramPercent = gpu.MemoryUsed.Value / gpu.MemoryTotal.Value * 100
@@ -2266,10 +2235,19 @@ func renderGPUSection(gpus []gpuStats, sparkline map[string][]float64, width int
 		}
 		lines = append(lines, metricLine("VRAM", vramPercent, vramStr, innerWidth))
 
+		utilStr := optPercentString(gpu.UtilPercent)
+		if gpu.UtilTrend != "" {
+			utilStr = gpu.UtilTrend + " " + utilStr
+		}
+		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
+
+		if history := sparkline[gpu.Index]; len(history) > 0 {
+			lines = append(lines, mutedStyle.Render("trend: "+renderSparkline(history, minInt(innerWidth-10, len(history)))))
+		}
+
 		details := []string{
 			"Temp " + optTemperatureString(gpu.Temperature),
 			"Power " + optPowerString(gpu.PowerDraw, gpu.PowerLimit),
-			"Fan " + optPercentString(gpu.FanPercent),
 		}
 		lines = append(lines, mutedStyle.Render(strings.Join(details, "   ")))
 
@@ -2333,19 +2311,20 @@ func renderAMDSection(gpus []amdGPUStats, width int, disabledSections map[string
 		}
 		lines = append(lines, valueStyle.Render(fitText(title, innerWidth)))
 
-		utilStr := optPercentString(gpu.UtilPercent)
-		if gpu.UtilTrend != "" {
-			utilStr = gpu.UtilTrend + " " + utilStr
-		}
-		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
-
 		vramPercent := 0.0
 		if gpu.MemoryUsed.OK && gpu.MemoryTotal.OK && gpu.MemoryTotal.Value > 0 {
 			vramPercent = gpu.MemoryUsed.Value / gpu.MemoryTotal.Value * 100
 		}
 		vramValue := fmt.Sprintf("%s / %s (%.1f%%)", optMemoryString(gpu.MemoryUsed), optMemoryString(gpu.MemoryTotal), vramPercent)
 		lines = append(lines, metricLine("VRAM", vramPercent, vramValue, innerWidth))
-		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})+"   Fan "+optPercentString(gpu.FanPercent)))
+
+		utilStr := optPercentString(gpu.UtilPercent)
+		if gpu.UtilTrend != "" {
+			utilStr = gpu.UtilTrend + " " + utilStr
+		}
+		lines = append(lines, metricLine("Util", optPercentValue(gpu.UtilPercent), utilStr, innerWidth))
+
+		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})))
 
 		llm := llmAMDProcesses(gpu.Processes)
 		other := otherAMDProcesses(gpu.Processes)
