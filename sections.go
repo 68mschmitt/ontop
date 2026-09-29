@@ -15,6 +15,7 @@ func makeSections(s snapshot, disabled map[string]bool) []section {
 		&gpuSection{snapshot: s, disabled: disabled},
 		&amdSection{snapshot: s, disabled: disabled},
 		&inferenceSection{snapshot: s, disabled: disabled},
+		&memorySection{snapshot: s, disabled: disabled},
 		&unslothSection{snapshot: s, disabled: disabled},
 		&ollamaProcessSection{snapshot: s, disabled: disabled},
 		&ollamaModelSection{snapshot: s, disabled: disabled},
@@ -143,4 +144,15 @@ func (s *ollamaModelSection) Name() string  { return "Ollama Models" }
 func (s *ollamaModelSection) Enabled() bool { return !(s.disabled != nil && s.disabled["Ollama"]) }
 func (s *ollamaModelSection) Render(w int) string {
 	return renderOllamaPS(s.snapshot.OllamaPS, w, s.disabled)
+}
+
+type memorySection struct {
+	snapshot snapshot
+	disabled map[string]bool
+}
+
+func (s *memorySection) Name() string  { return "Memory" }
+func (s *memorySection) Enabled() bool { return !(s.disabled != nil && s.disabled["Memory"]) }
+func (s *memorySection) Render(w int) string {
+	return renderMemoryCard(s.snapshot.Memory, s.snapshot.Swap, s.snapshot.RAMHistory, w)
 }

@@ -557,6 +557,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.disabledSections["System"] = enabled
 				m.notification = fmt.Sprintf("System section %s", mapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
+			case 'm':
+				if m.disabledSections == nil {
+					m.disabledSections = make(map[string]bool)
+				}
+				enabled := !m.disabledSections["Memory"]
+				m.disabledSections["Memory"] = enabled
+				m.notification = fmt.Sprintf("Memory section %s", mapBoolString(enabled))
+				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'u':
 				if m.disabledSections == nil {
 					m.disabledSections = make(map[string]bool)
@@ -1813,6 +1821,7 @@ func renderFooter(width int, disabledSections map[string]bool) string {
 	}{
 		{"s", "System", !isEnabled(disabledSections, "System")},
 		{"g", "GPU", !isEnabled(disabledSections, "GPU")},
+		{"m", "Memory", !isEnabled(disabledSections, "Memory")},
 		{"u", "Unsloth", !isEnabled(disabledSections, "Unsloth")},
 		{"o", "Ollama", !isEnabled(disabledSections, "Ollama")},
 	}
@@ -1842,8 +1851,9 @@ func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 	lines := []string{
 		"q / Ctrl+C   quit",
 		"r            refresh",
-		"s            toggle System (CPU/RAM)",
+		"s            toggle System (CPU)",
 		"g            toggle GPU (NVIDIA/AMD)",
+		"m            toggle Memory (RAM/Swap)",
 		"u            toggle Unsloth",
 		"o            toggle Ollama",
 		"h/?          hide this help",
@@ -1863,6 +1873,7 @@ func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 	}{
 		{"System", isEnabled(disabledSections, "System")},
 		{"GPU", isEnabled(disabledSections, "GPU")},
+		{"Memory", isEnabled(disabledSections, "Memory")},
 		{"Unsloth", isEnabled(disabledSections, "Unsloth")},
 		{"Ollama", isEnabled(disabledSections, "Ollama")},
 	}
@@ -1910,31 +1921,20 @@ func renderSystem(s snapshot, width int, disabledSections map[string]bool) strin
 		return ""
 	}
 	cpuBody := renderCPU(s.CPU, s.CPUHistory, width)
-	ramBody := renderMemory(s.Memory, s.RAMHistory, width)
 
 	var body string
 	innerWidth := maxInt(20, width-6)
-	if innerWidth >= 50 {
+	thermBody := renderThermal(s.Thermal, width)
+	hasThermal := s.Thermal.OK && len(s.Thermal.Zone) > 0 && thermBody != ""
+
+	if innerWidth >= 50 && hasThermal {
 		cpuCol := lipgloss.NewStyle().Width(innerWidth / 2).Render(sectionTitleStyle.Render("CPU") + "\n" + cpuBody)
-		ramCol := lipgloss.NewStyle().Width(innerWidth / 2).Render(sectionTitleStyle.Render("RAM") + "\n" + ramBody)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, cpuCol, ramCol)
-		if s.Swap.OK {
-			body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
-		}
-		if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
-			if body != "" {
-				body += "\n\n"
-			}
-			body += sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
-		}
+		thermCol := lipgloss.NewStyle().Width(innerWidth / 2).Render(sectionTitleStyle.Render("Thermal") + "\n" + thermBody)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, cpuCol, thermCol)
+	} else if hasThermal {
+		body = sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("Thermal") + "\n" + thermBody
 	} else {
-		body = sectionTitleStyle.Render("CPU") + "\n" + cpuBody + "\n\n" + sectionTitleStyle.Render("RAM") + "\n" + ramBody
-		if s.Swap.OK {
-			body += "\n\n" + sectionTitleStyle.Render("Swap") + "\n" + renderSwap(s.Swap, width)
-		}
-		if s.Thermal.OK && len(s.Thermal.Zone) > 0 {
-			body += "\n\n" + sectionTitleStyle.Render("Thermal") + "\n" + renderThermal(s.Thermal, width)
-		}
+		body = sectionTitleStyle.Render("CPU") + "\n" + cpuBody
 	}
 	return renderGroup("System", body, width)
 }
@@ -1986,6 +1986,28 @@ func renderSwap(stats swapMemoryStats, width int) string {
 		percent = float64(stats.Used) / float64(stats.Total) * 100
 	}
 	return metricLine("Swap", percent, fmt.Sprintf("%.1f%%  %s", percent, used), innerWidth)
+}
+
+func renderMemoryCard(mem memoryStats, swap swapMemoryStats, history []float64, width int) string {
+	if !mem.OK {
+		return renderCard("Memory", mutedStyle.Render("RAM metrics unavailable."), width)
+	}
+
+	innerWidth := maxInt(20, width-6)
+	lines := []string{metricLine("RAM", mem.Percent, fmt.Sprintf("free %s", humanBytes(mem.Available)), innerWidth)}
+
+	if swap.OK && swap.Total > 0 {
+		swapUsed := fmt.Sprintf("%s / %s", humanBytes(swap.Used), humanBytes(swap.Total))
+		swapPercent := float64(swap.Used) / float64(swap.Total) * 100
+		lines = append(lines, "")
+		lines = append(lines, metricLine("Swap", swapPercent, fmt.Sprintf("%s", swapUsed), innerWidth))
+	}
+	if len(history) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, mutedStyle.Render("trend: "+renderSparkline(history, minInt(len(history), maxInt(10, innerWidth-10)))))
+	}
+
+	return renderCard("Memory", strings.Join(lines, "\n"), width)
 }
 
 func renderThermal(stats thermalStats, width int) string {
