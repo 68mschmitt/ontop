@@ -207,6 +207,7 @@ func TestRenderContentOrdering(t *testing.T) {
 		{PID: 200, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
 	}
 	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
+	s.AMDGPUs = []amdGPUStats{{Name: "Test AMD", Index: "0"}}
 
 	content := renderContent(s, 120, nil)
 

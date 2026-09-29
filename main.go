@@ -107,6 +107,7 @@ type diskStats struct {
 	OK       bool
 	Devices  []diskDeviceStats
 	Warnings []string
+	Rates    []diskDeviceRates
 }
 
 type diskDeviceStats struct {
@@ -117,9 +118,16 @@ type diskDeviceStats struct {
 	WriteIOSS  uint64
 }
 
+type diskDeviceRates struct {
+	Name     string
+	ReadBps  float64
+	WriteBps float64
+}
+
 type netStats struct {
 	OK      bool
 	Devices []netDeviceStats
+	Rates   []netDeviceRates
 }
 
 type netDeviceStats struct {
@@ -128,6 +136,12 @@ type netDeviceStats struct {
 	BytesRecv   uint64
 	PacketsSent uint64
 	PacketsRecv uint64
+}
+
+type netDeviceRates struct {
+	Name         string
+	BytesSentBps float64
+	BytesRecvBps float64
 }
 
 type gpuStats struct {
@@ -237,6 +251,8 @@ type unslothStudioStats struct {
 // classifyProvider maps a process name and optional cmdline to a specific
 // provider label. Returns "" for unrecognized names (rendered as "other").
 var prevSnapshot snapshot
+var prevDiskIO map[string]diskDeviceStats
+var prevNetIO map[string]netDeviceStats
 var CurrentTheme Theme = themes["dark"]
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -661,6 +677,27 @@ func collectMetrics(ctx context.Context) snapshot {
 	started := time.Now()
 	s := snapshot{CollectedAt: started}
 
+	prevDisk := make(map[string]diskDeviceStats)
+	if prevDiskIO != nil {
+		prevDisk = make(map[string]diskDeviceStats, len(prevDiskIO))
+		for k, v := range prevDiskIO {
+			prevDisk[k] = v
+		}
+	}
+	prevNet := make(map[string]netDeviceStats)
+	if prevNetIO != nil {
+		prevNet = make(map[string]netDeviceStats, len(prevNetIO))
+		for k, v := range prevNetIO {
+			prevNet[k] = v
+		}
+	}
+
+	prevCollectedAt := prevSnapshot.CollectedAt
+	var elapsed float64
+	if !prevCollectedAt.IsZero() {
+		elapsed = s.CollectedAt.Sub(prevCollectedAt).Seconds()
+	}
+
 	s.CPU = collectCPU(ctx, &s.Warnings)
 	s.Memory = collectMemory(ctx, &s.Warnings)
 	s.Swap = collectSwap(ctx, &s.Warnings)
@@ -670,6 +707,44 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings, prevSnapshot.GPUs)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings, prevSnapshot.AMDGPUs)
 	s.GPUSparkline = mergeGPUSparkline(prevSnapshot.GPUSparkline, s.GPUs)
+
+	if elapsed > 0.5 {
+		for _, curr := range s.Disk.Devices {
+			if prev, ok := prevDisk[curr.Name]; ok {
+				dt := float64(curr.ReadBytes-prev.ReadBytes) / elapsed
+				wt := float64(curr.WriteBytes-prev.WriteBytes) / elapsed
+				s.Disk.Rates = append(s.Disk.Rates, diskDeviceRates{
+					Name:     curr.Name,
+					ReadBps:  math.Max(dt, 0),
+					WriteBps: math.Max(wt, 0),
+				})
+			}
+		}
+		for _, curr := range s.Net.Devices {
+			if prev, ok := prevNet[curr.Name]; ok {
+				st := float64(curr.BytesSent-prev.BytesSent) / elapsed
+				rt := float64(curr.BytesRecv-prev.BytesRecv) / elapsed
+				s.Net.Rates = append(s.Net.Rates, netDeviceRates{
+					Name:         curr.Name,
+					BytesSentBps: math.Max(st, 0),
+					BytesRecvBps: math.Max(rt, 0),
+				})
+			}
+		}
+	}
+
+	diskForPrev := make([]diskDeviceStats, len(s.Disk.Devices))
+	copy(diskForPrev, s.Disk.Devices)
+	netForPrev := make([]netDeviceStats, len(s.Net.Devices))
+	copy(netForPrev, s.Net.Devices)
+	prevDiskIO = make(map[string]diskDeviceStats)
+	for _, d := range diskForPrev {
+		prevDiskIO[d.Name] = d
+	}
+	prevNetIO = make(map[string]netDeviceStats)
+	for _, d := range netForPrev {
+		prevNetIO[d.Name] = d
+	}
 
 	var historyCPU []float64
 	if len(prevSnapshot.CPUHistory) > 0 {
@@ -1803,33 +1878,7 @@ func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 }
 
 func renderContent(s snapshot, width int, disabledSections map[string]bool) string {
-	if s.CollectedAt.IsZero() {
-		return renderCard("Status", mutedStyle.Render("Collecting initial metrics..."), width)
-	}
-
-	sections := make([]string, 0, 7)
-	if len(s.Warnings) > 0 {
-		if notices := renderWarnings(s.Warnings, width); notices != "" {
-			sections = append(sections, notices)
-		}
-	}
-	for _, section := range []string{
-		renderSystem(s, width, disabledSections),
-		renderInference(s.Inference, width, disabledSections),
-		renderGPUSection(s.GPUs, s.GPUSparkline, width, disabledSections),
-		renderAMDSection(s.AMDGPUs, width, disabledSections),
-		renderDiskCard(s.Disk, width, disabledSections),
-		renderNetCard(s.Net, width, disabledSections),
-		renderUnslothStudio(s.UnslothStudio, width, disabledSections),
-		renderOllamaProcesses(s.OllamaProcesses, width, disabledSections),
-		renderOllamaPS(s.OllamaPS, width, disabledSections),
-	} {
-		if strings.TrimSpace(section) != "" {
-			sections = append(sections, section)
-		}
-	}
-
-	return strings.Join(sections, "\n\n")
+	return renderContentSections(s, width, disabledSections)
 }
 
 func renderWarnings(warnings []string, width int) string {
@@ -1999,18 +2048,27 @@ func renderDisk(stats diskStats, width int) string {
 
 	barWidth := maxInt(10, innerWidth-70)
 
-	for _, dev := range stats.Devices {
+	for i, dev := range stats.Devices {
 		readStr := humanBytes(dev.ReadBytes)
 		writeStr := humanBytes(dev.WriteBytes)
 
 		totalIO := float64(dev.ReadIOss + dev.WriteIOSS)
-		if totalIO > 0 {
-			pct := float64(dev.WriteIOSS) / float64(totalIO) * 100
-			lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
-			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", renderBar(pct, barWidth), readStr, writeStr))
+		lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
+		if len(stats.Rates) > i && stats.Rates[i].ReadBps > 0 {
+			r := stats.Rates[i]
+			if totalIO > 0 {
+				pct := float64(dev.WriteIOSS) / float64(totalIO) * 100
+				lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s  \u2193 %s/s  \u2191 %s/s", renderBar(pct, barWidth), readStr, writeStr, humanBytesRate(r.ReadBps), humanBytesRate(r.WriteBps)))
+			} else {
+				lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s  \u2193 %s/s  \u2191 %s/s", barEmptyStyle.Render(strings.Repeat("-", barWidth)), readStr, writeStr, humanBytesRate(r.ReadBps), humanBytesRate(r.WriteBps)))
+			}
 		} else {
-			lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
-			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", barEmptyStyle.Render(strings.Repeat("-", barWidth)), readStr, writeStr))
+			if totalIO > 0 {
+				pct := float64(dev.WriteIOSS) / float64(totalIO) * 100
+				lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", renderBar(pct, barWidth), readStr, writeStr))
+			} else {
+				lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", barEmptyStyle.Render(strings.Repeat("-", barWidth)), readStr, writeStr))
+			}
 		}
 	}
 
@@ -2041,7 +2099,7 @@ func renderNet(stats netStats, width int) string {
 	innerWidth := maxInt(20, width-6)
 	var lines []string
 
-	for _, dev := range stats.Devices {
+	for i, dev := range stats.Devices {
 		barWidth := maxInt(10, innerWidth-60)
 		totalBytes := dev.BytesSent + dev.BytesRecv
 		pct := float64(dev.BytesRecv) / float64(totalBytes) * 100
@@ -2053,7 +2111,12 @@ func renderNet(stats netStats, width int) string {
 		recvStr := humanBytes(dev.BytesRecv)
 
 		lines = append(lines, labelStyle.Render(fmt.Sprintf("%s", dev.Name)))
-		lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", bar, recvStr, sentStr))
+		if len(stats.Rates) > i && stats.Rates[i].BytesSentBps > 0 {
+			r := stats.Rates[i]
+			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s  \u2193 %s/s  \u2191 %s/s", bar, recvStr, sentStr, humanBytesRate(r.BytesRecvBps), humanBytesRate(r.BytesSentBps)))
+		} else {
+			lines = append(lines, fmt.Sprintf("  %s  \u2193 %s  \u2191 %s", bar, recvStr, sentStr))
+		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -2635,7 +2698,16 @@ func metricLine(label string, percent float64, value string, width int) string {
 
 func renderCoreCell(index int, percent float64, width int) string {
 	barWidth := clampInt(width-13, 6, 14)
-	return fmt.Sprintf("C%-2d %s %5.1f%%", index, renderBar(percent, barWidth), percent)
+	filled := int(percent / 100 * float64(barWidth))
+	filled = clampInt(filled, 0, barWidth)
+	style := barOKStyle
+	if percent >= 90 {
+		style = barDangerStyle
+	} else if percent >= 75 {
+		style = barWarnStyle
+	}
+	coreLabel := fmt.Sprintf("C%-2d", index)
+	return fmt.Sprintf("%s %s %5.1f%%", coreLabel, style.Render(strings.Repeat("█", filled)), percent)
 }
 
 func renderCoreRow(perCore []float64, width int) string {
@@ -2687,7 +2759,9 @@ func renderBar(percent float64, width int) string {
 		style = barWarnStyle
 	}
 
-	return "[" + style.Render(strings.Repeat("#", filled)) + barEmptyStyle.Render(strings.Repeat("-", width-filled)) + "]"
+	full := "█"
+	empty := "░"
+	return style.Render(strings.Repeat(full, filled)) + barEmptyStyle.Render(strings.Repeat(empty, width-filled))
 }
 
 func commandLabel(p ollamaProcess) string {
@@ -2766,6 +2840,23 @@ func humanBytes(value uint64) string {
 	}
 
 	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(div), "KMGTPE"[exp])
+}
+
+func humanBytesRate(bps float64) string {
+	if bps < 100 {
+		return fmt.Sprintf("%.0f B/s", bps)
+	}
+	const unit = 1024.0
+	if bps < unit {
+		return fmt.Sprintf("%.1f B/s", bps)
+	}
+	exp := 0
+	value := bps
+	for value >= unit && exp < 5 {
+		value /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB/s", value, "KMGTPE"[exp])
 }
 
 func shortDuration(d time.Duration) string {
