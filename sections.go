@@ -12,15 +12,15 @@ type section interface {
 
 func makeSections(s snapshot, disabled map[string]bool) []section {
 	return []section{
-		&systemSection{snapshot: s, disabled: disabled},
-		&inferenceSection{snapshot: s, disabled: disabled},
 		&gpuSection{snapshot: s, disabled: disabled},
 		&amdSection{snapshot: s, disabled: disabled},
-		&diskSection{snapshot: s, disabled: disabled},
-		&netSection{snapshot: s, disabled: disabled},
+		&inferenceSection{snapshot: s, disabled: disabled},
 		&unslothSection{snapshot: s, disabled: disabled},
 		&ollamaProcessSection{snapshot: s, disabled: disabled},
 		&ollamaModelSection{snapshot: s, disabled: disabled},
+		&systemSection{snapshot: s, disabled: disabled},
+		&diskSection{snapshot: s, disabled: disabled},
+		&netSection{snapshot: s, disabled: disabled},
 	}
 }
 
@@ -30,9 +30,10 @@ func renderContentSections(s snapshot, width int, disabledSections map[string]bo
 	}
 
 	var parts []string
+	var notices string
 	if len(s.Warnings) > 0 {
-		if notices := renderWarnings(s.Warnings, width); notices != "" {
-			parts = append(parts, notices)
+		if w := renderWarnings(s.Warnings, width); w != "" {
+			notices = w
 		}
 	}
 	for _, sec := range makeSections(s, disabledSections) {
@@ -42,6 +43,9 @@ func renderContentSections(s snapshot, width int, disabledSections map[string]bo
 				parts = append(parts, content)
 			}
 		}
+	}
+	if notices != "" {
+		parts = append(parts, notices)
 	}
 
 	return strings.Join(parts, "\n\n")
@@ -65,10 +69,7 @@ func (s *inferenceSection) Name() string  { return "Unified Inference" }
 func (s *inferenceSection) Enabled() bool { return true }
 func (s *inferenceSection) Render(w int) string {
 	if len(s.snapshot.Inference) == 0 {
-		if s.disabled != nil && s.disabled["GPU"] {
-			return ""
-		}
-		return renderCard("Unified Inference", mutedStyle.Render("No models detected/loaded"), w)
+		return ""
 	}
 	return renderInference(s.snapshot.Inference, w, s.disabled)
 }

@@ -212,7 +212,20 @@ func TestRenderContentOrdering(t *testing.T) {
 	content := renderContent(s, 120, nil)
 
 	idx := func(name string) int { return strings.Index(content, name) }
-	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
+	wantOrder := func(before, after string) int {
+		b, a := idx(before), idx(after)
+		if b < 0 && a < 0 {
+			return 0
+		}
+		if b < 0 {
+			return -1
+		}
+		if a < 0 {
+			return 1
+		}
+		return b - a
+	}
+	if wantOrder("NVIDIA GPU", "AMD GPU") > 0 || wantOrder("AMD GPU", "Unified Inference") > 0 || wantOrder("Unified Inference", "System") > 0 {
 		t.Fatalf("unexpected section ordering: %q", content)
 	}
 }
