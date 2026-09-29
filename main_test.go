@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -64,3 +65,153 @@ func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
 		t.Fatalf("optional service card rendered without metrics: %q", content)
 	}
 }
+
+func TestClassifyProvider(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"ollama", "Ollama"},
+		{"OLLAMA", "Ollama"},
+		{"  ollama  ", "Ollama"},
+		{"unsloth", "Unsloth"},
+		{"python-unsloth", "Unsloth"},
+		{"Python-Unsloth", "Unsloth"},
+		{"unsloth-trainer", "Unsloth"},
+		{"vllm", "vLLM"},
+		{"text-generation-server", "vLLM"},
+		{"koboldcpp", "KoboldCPP"},
+		{"xtt", "Local Inference"},
+		{"voyager", "Local Inference"},
+		{"sGLM", "Local Inference"},
+		{"llama.cpp", "Local Inference"},
+		{"llama-srv", "Local Inference"},
+		{"chrome", ""},
+		{"node", ""},
+		{"unknown-binary-1234", ""},
+	}
+	for _, c := range cases {
+		if got := classifyProvider(c.in); got != c.want {
+			t.Fatalf("classifyProvider(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
+	output := `{"devices":[
+		{"Info":{"DeviceName":"AMD Radeon RX 9070 XT","DevicePath":{"pci":"0000:03:00.0"}},"gpu_activity":{},"Sensors":{},"VRAM":{},"fdinfo":{
+			"100":{"name":"ollama","usage":{"GTT":{"unit":"MiB","value":8},"VRAM":{"unit":"MiB","value":4096}}},
+			"200":{"name":"python-unsloth","usage":{"GTT":{"unit":"MiB","value":16},"VRAM":{"unit":"MiB","value":12288}}}
+		}}]}`
+
+	gpus, err := parseAMDJSON(output)
+	if err != nil {
+		t.Fatalf("parseAMDJSON returned error: %v", err)
+	}
+	if len(gpus) != 1 || len(gpus[0].Processes) != 2 {
+		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
+	}
+
+	inference := collectInference(context.Background(), &[]string{})
+	if len(inference) != 2 {
+		t.Fatalf("got %d inference processes, want 2", len(inference))
+	}
+	if !inference[0].VRAMMiB.OK || inference[0].VRAMMiB.Value != 12288 {
+		t.Fatalf("expected highest VRAM first: %+v", inference[0])
+	}
+	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
+		t.Fatalf("unexpected providers/order: %+v", inference)
+	}
+	if inference[0].PID != 200 || inference[1].PID != 100 {
+		t.Fatalf("unexpected PIDs/order: %+v", inference)
+	}
+}
+
+func TestRenderInferenceEmptyCard(t *testing.T) {
+	card := renderInference(nil, 80)
+	if !strings.Contains(card, "Unified Inference") || !strings.Contains(card, "No models detected/loaded") {
+		t.Fatalf("expected empty inference card: %q", card)
+	}
+}
+
+func TestRenderInferenceGrouping(t *testing.T) {
+	inference := []inferenceProcess{
+		{PID: 200, Provider: "Unsloth", Name: "unsloth-trainer", VRAMMiB: optFloat{Value: 12288, OK: true}, GTTMiB: optFloat{Value: 16, OK: true}},
+		{PID: 100, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}, GTTMiB: optFloat{Value: 8, OK: true}},
+		{PID: 50, Name: "chrome", VRAMMiB: optFloat{Value: 2048, OK: true}, GTTMiB: optFloat{}},
+	}
+
+	content := renderInference(inference, 120)
+	if !strings.Contains(content, "Unified Inference") {
+		t.Fatalf("expected inference card: %q", content)
+	}
+	if !strings.Contains(content, "LLM Processes") || !strings.Contains(content, "Other Processes") {
+		t.Fatalf("expected LLM and Other sub-tables: %q", content)
+	}
+	if !strings.Contains(content, "Unsloth") || !strings.Contains(content, "Ollama") {
+		t.Fatalf("expected provider labels in LLM table: %q", content)
+	}
+	if !strings.Contains(content, "chrome") {
+		t.Fatalf("expected chrome in Other table: %q", content)
+	}
+}
+
+func TestRenderGPUSectionGrouping(t *testing.T) {
+	gpus := []gpuStats{
+		{
+			Name:   "Test GPU",
+			Index:  "0",
+			Processes: []gpuProcess{
+				{GPUUUID: "uuid-0", PID: 200, Provider: "vLLM", Name: "vllm", UsedMemoryMB: optFloat{Value: 8192, OK: true}},
+				{GPUUUID: "uuid-0", PID: 50, Name: "chrome", UsedMemoryMB: optFloat{Value: 1024, OK: true}},
+			},
+		},
+	}
+
+	content := renderGPUSection(gpus, 120)
+	if !strings.Contains(content, "NVIDIA GPU") {
+		t.Fatalf("expected NVIDIA card: %q", content)
+	}
+	if !strings.Contains(content, "LLM Processes") || !strings.Contains(content, "Other Processes") {
+		t.Fatalf("expected LLM and Other sub-tables: %q", content)
+	}
+	if !strings.Contains(content, "vllm") || !strings.Contains(content, "chrome") {
+		t.Fatalf("expected both process groups rendered: %q", content)
+	}
+}
+
+func TestRenderGPUSectionLLMOnly(t *testing.T) {
+	gpus := []gpuStats{
+		{
+			Name:   "Test GPU",
+			Index:  "0",
+			Processes: []gpuProcess{
+				{GPUUUID: "uuid-0", PID: 200, Provider: "vLLM", Name: "vllm", UsedMemoryMB: optFloat{Value: 8192, OK: true}},
+			},
+		},
+	}
+
+	content := renderGPUSection(gpus, 120)
+	if !strings.Contains(content, "NVIDIA GPU") || !strings.Contains(content, "LLM Processes") {
+		t.Fatalf("expected NVIDIA card with LLM table only: %q", content)
+	}
+	if strings.Contains(content, "Other Processes") {
+		t.Fatalf("did not expect Other Processes table when empty: %q", content)
+	}
+}
+
+func TestRenderContentOrdering(t *testing.T) {
+	s := snapshot{CollectedAt: time.Now()}
+	s.Inference = []inferenceProcess{
+		{PID: 200, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
+	}
+	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
+
+	content := renderContent(s, 120)
+
+	idx := func(name string) int { return strings.Index(content, name) }
+	if idx("System") > idx("Unified Inference") || idx("Unified Inference") > idx("NVIDIA GPU") || idx("NVIDIA GPU") > idx("AMD GPU") {
+		t.Fatalf("unexpected section ordering: %q", content)
+	}
+}
+

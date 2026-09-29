@@ -45,11 +45,20 @@ type snapshot struct {
 	Memory           memoryStats
 	GPUs             []gpuStats
 	AMDGPUs          []amdGPUStats
+	Inference        []inferenceProcess
 	OllamaProcesses  []ollamaProcess
 	OllamaPS         commandOutput
 	UnslothStudio    unslothStudioStats
 	Warnings         []string
 	CollectionMillis int64
+}
+
+type inferenceProcess struct {
+	PID      int32
+	Provider string
+	Name     string
+	VRAMMiB  optFloat
+	GTTMiB   optFloat
 }
 
 type cpuStats struct {
@@ -83,6 +92,7 @@ type gpuStats struct {
 type gpuProcess struct {
 	GPUUUID      string
 	PID          int32
+	Provider     string
 	Name         string
 	UsedMemoryMB optFloat
 }
@@ -100,10 +110,11 @@ type amdGPUStats struct {
 }
 
 type amdGPUProcess struct {
-	PID     int32
-	Name    string
-	VRAMMiB optFloat
-	GTTMiB  optFloat
+	PID      int32
+	Provider string
+	Name     string
+	VRAMMiB  optFloat
+	GTTMiB   optFloat
 }
 
 type ollamaProcess struct {
@@ -159,6 +170,26 @@ type unslothStudioStats struct {
 	LoadBytes           int64
 	LoadTotal           int64
 	Error               string
+}
+
+// classifyProvider maps a process name to a specific provider label.
+// Returns "" for unrecognized names (rendered as "other").
+func classifyProvider(name string) string {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case "ollama":
+		return "Ollama"
+	case "unsloth", "python-unsloth", "unsloth-trainer":
+		return "Unsloth"
+	case "vllm", "text-generation-server":
+		return "vLLM"
+	case "koboldcpp":
+		return "KoboldCPP"
+	case "xtt", "voyager", "sglm", "llama.cpp", "llama-srv":
+		return "Local Inference"
+	default:
+		return ""
+	}
 }
 
 type tickMsg time.Time
@@ -354,6 +385,7 @@ func collectMetrics(ctx context.Context) snapshot {
 	s.Memory = collectMemory(ctx, &s.Warnings)
 	s.GPUs = collectNVIDIA(ctx, &s.Warnings)
 	s.AMDGPUs = collectAMD(ctx, &s.Warnings)
+	s.Inference = collectInference(ctx, &s.Warnings)
 	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
 	s.OllamaPS = collectOllamaPS(ctx)
 	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
@@ -455,6 +487,46 @@ func collectAMD(ctx context.Context, warnings *[]string) []amdGPUStats {
 	return gpus
 }
 
+func collectInference(ctx context.Context, warnings *[]string) []inferenceProcess {
+	if _, err := exec.LookPath("amdgpu_top"); err != nil {
+		return nil
+	}
+
+	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
+	if err != nil {
+		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
+		return nil
+	}
+
+	gpus, err := parseAMDJSON(stdout)
+	if err != nil {
+		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
+		return nil
+	}
+
+	inference := make([]inferenceProcess, 0)
+	for _, gpu := range gpus {
+		for _, p := range gpu.Processes {
+			inference = append(inference, inferenceProcess{
+				PID:      p.PID,
+				Provider: p.Provider,
+				Name:     p.Name,
+				VRAMMiB:  p.VRAMMiB,
+				GTTMiB:   p.GTTMiB,
+			})
+		}
+	}
+
+	sort.SliceStable(inference, func(i, j int) bool {
+		if inference[i].VRAMMiB.OK != inference[j].VRAMMiB.OK {
+			return inference[i].VRAMMiB.OK
+		}
+		return inference[i].VRAMMiB.Value > inference[j].VRAMMiB.Value
+	})
+
+	return inference
+}
+
 func parseGPUCSV(output string) ([]gpuStats, error) {
 	records, err := readCSV(output)
 	if err != nil {
@@ -539,10 +611,11 @@ func parseAMDProcesses(raw map[string]json.RawMessage) []amdGPUProcess {
 
 		name, vram, gtt := parseAMDProcess(processRaw)
 		processes = append(processes, amdGPUProcess{
-			PID:     int32(pid),
-			Name:    name,
-			VRAMMiB: vram,
-			GTTMiB:  gtt,
+			PID:      int32(pid),
+			Provider: classifyProvider(name),
+			Name:     name,
+			VRAMMiB:  vram,
+			GTTMiB:   gtt,
 		})
 	}
 
@@ -643,10 +716,12 @@ func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
 			continue
 		}
 
+		processName := strings.TrimSpace(row[2])
 		processes = append(processes, gpuProcess{
 			GPUUUID:      strings.TrimSpace(row[0]),
 			PID:          int32(pid64),
-			Name:         strings.TrimSpace(row[2]),
+			Provider:     classifyProvider(processName),
+			Name:         processName,
 			UsedMemoryMB: parseOptFloat(row[3]),
 		})
 	}
@@ -1080,6 +1155,7 @@ func renderContent(s snapshot, width int) string {
 	}
 	for _, section := range []string{
 		renderSystem(s, width),
+		renderInference(s.Inference, width),
 		renderGPUSection(s.GPUs, width),
 		renderAMDSection(s.AMDGPUs, width),
 		renderUnslothStudio(s.UnslothStudio, width),
@@ -1148,6 +1224,93 @@ func renderMemory(stats memoryStats, width int) string {
 	return metricLine("RAM", stats.Percent, fmt.Sprintf("%.1f%%  %s", stats.Percent, used), innerWidth)
 }
 
+func llmProcesses(processes []gpuProcess) []gpuProcess {
+	out := make([]gpuProcess, 0)
+	for _, p := range processes {
+		if p.Provider != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func otherProcesses(processes []gpuProcess) []gpuProcess {
+	out := make([]gpuProcess, 0)
+	for _, p := range processes {
+		if p.Provider == "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func renderInference(inference []inferenceProcess, width int) string {
+	if len(inference) == 0 {
+		return renderCard("Unified Inference", mutedStyle.Render("No models detected/loaded"), width)
+	}
+
+	innerWidth := maxInt(20, width-6)
+	lines := make([]string, 0)
+
+	llm := llmProcessesFromInference(inference)
+	other := otherProcessesFromInference(inference)
+
+	if len(llm) > 0 {
+		lines = append(lines, renderInferenceTable(llm, innerWidth))
+	}
+	if len(other) > 0 {
+		lines = append(lines, renderInferenceTable(other, innerWidth))
+	}
+
+	return renderCard("Unified Inference", strings.Join(lines, "\n"), width)
+}
+
+func llmProcessesFromInference(inference []inferenceProcess) []inferenceProcess {
+	out := make([]inferenceProcess, 0)
+	for _, p := range inference {
+		if p.Provider != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func otherProcessesFromInference(inference []inferenceProcess) []inferenceProcess {
+	out := make([]inferenceProcess, 0)
+	for _, p := range inference {
+		if p.Provider == "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func renderInferenceTable(processes []inferenceProcess, width int) string {
+	if width < 48 {
+		processWidth := maxInt(8, width-18)
+		lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
+		for _, p := range processes {
+			name := p.Name
+			if name == "" {
+				name = "unknown"
+			}
+			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	processWidth := maxInt(12, width-38)
+	lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %-9s %s", "PID", "Provider", "VRAM", "PROCESS"))}
+	for _, p := range processes {
+		name := p.Name
+		if name == "" {
+			name = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, labelStyle.Render(p.Provider), optMemoryString(p.VRAMMiB), fitText(name, processWidth)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderGPUSection(gpus []gpuStats, width int) string {
 	if len(gpus) == 0 {
 		return ""
@@ -1181,14 +1344,38 @@ func renderGPUSection(gpus []gpuStats, width int) string {
 		}
 		lines = append(lines, mutedStyle.Render(strings.Join(details, "   ")))
 
-		if len(gpu.Processes) == 0 {
-			lines = append(lines, mutedStyle.Render("No active compute processes."))
-			continue
+		llm := llmProcesses(gpu.Processes)
+		other := otherProcesses(gpu.Processes)
+
+		if len(llm) > 0 {
+			lines = append(lines, renderGPUProcessTable(llm, innerWidth))
 		}
-		lines = append(lines, renderGPUProcessTable(gpu.Processes, innerWidth))
+		if len(other) > 0 {
+			lines = append(lines, renderGPUProcessTable(other, innerWidth))
+		}
 	}
 
 	return renderCard("NVIDIA GPU", strings.Join(lines, "\n"), width)
+}
+
+func llmAMDProcesses(processes []amdGPUProcess) []amdGPUProcess {
+	out := make([]amdGPUProcess, 0)
+	for _, p := range processes {
+		if p.Provider != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func otherAMDProcesses(processes []amdGPUProcess) []amdGPUProcess {
+	out := make([]amdGPUProcess, 0)
+	for _, p := range processes {
+		if p.Provider == "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func renderAMDSection(gpus []amdGPUStats, width int) string {
@@ -1221,10 +1408,14 @@ func renderAMDSection(gpus []amdGPUStats, width int) string {
 		lines = append(lines, metricLine("VRAM", vramPercent, vramValue, innerWidth))
 		lines = append(lines, mutedStyle.Render("Temp "+optTemperatureString(gpu.Temperature)+"   Power "+optPowerString(gpu.PowerDraw, optFloat{})))
 
-		if len(gpu.Processes) == 0 {
-			lines = append(lines, mutedStyle.Render("No active GPU processes."))
-		} else {
-			lines = append(lines, renderAMDProcessTable(gpu.Processes, innerWidth))
+		llm := llmAMDProcesses(gpu.Processes)
+		other := otherAMDProcesses(gpu.Processes)
+
+		if len(llm) > 0 {
+			lines = append(lines, renderAMDProcessTable(llm, innerWidth))
+		}
+		if len(other) > 0 {
+			lines = append(lines, renderAMDProcessTable(other, innerWidth))
 		}
 	}
 
