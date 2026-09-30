@@ -11,12 +11,6 @@ import (
 	"ontop/internal/collect"
 )
 
-type TeaTickMessage time.Time
-
-type TeaMetricsMessage struct {
-	Snapshot collect.Snapshot
-}
-
 type RenderFuncs struct {
 	RenderContentFn   func(s collect.Snapshot, width int, disabledSections map[string]bool) string
 	RenderHeaderFn    func(s collect.Snapshot, interval time.Duration, loading bool, flash bool, frame string, width int) string
@@ -68,7 +62,7 @@ func NewModel(interval time.Duration, cfg UIConfig, rf RenderFuncs) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(collect.CollectMetricsCmd(), tickCmd(m.interval))
+	return tea.Batch(collect.CollectMetricsCmd(), collect.TickCmd(m.interval))
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -128,16 +122,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flashActive = true
 		m.flashEnd = time.Now().Add(300 * time.Millisecond).UnixNano()
 		m.updateViewport()
-	case TeaMetricsMessage:
+	case collect.MetricsMessage:
 		m.snapshot = msg.Snapshot
 		m.loading = false
 		m.updateViewport()
-	case TeaTickMessage:
+	case collect.TickMsg:
 		m.spinnerIndex = (m.spinnerIndex + 1) % len(spinnerFrames)
 		if time.Now().UnixNano() >= m.notificationEnd {
 			m.notification = ""
 		}
-		cmds = append(cmds, tickCmd(m.interval))
+		cmds = append(cmds, collect.TickCmd(m.interval))
 		if !m.loading {
 			m.loading = true
 			cmds = append(cmds, collect.CollectMetricsCmd())
@@ -202,12 +196,6 @@ func (m *Model) updateViewport() {
 	m.viewport.Width = maxInt(20, m.width)
 	m.viewport.Height = maxInt(1, m.height-5)
 	m.viewport.SetContent(m.render.RenderContentFn(m.snapshot, m.viewport.Width, m.disabledSections))
-}
-
-func tickCmd(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(t time.Time) tea.Msg {
-		return TeaTickMessage(t)
-	})
 }
 
 func maxInt(a, b int) int {

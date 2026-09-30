@@ -7,15 +7,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type tickMsg time.Time
+type TickMsg time.Time
 
-type metricsMsg struct {
+type MetricsMessage struct {
 	Snapshot Snapshot
 }
 
 func TickCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return tickMsg(t)
+		return TickMsg(t)
 	})
 }
 
@@ -24,6 +24,6 @@ func CollectMetricsCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 
-		return metricsMsg{Snapshot: CollectMetrics(ctx)}
+		return MetricsMessage{Snapshot: CollectMetrics(ctx)}
 	}
 }
