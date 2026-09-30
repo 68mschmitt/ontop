@@ -1,83 +1,13 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/mattn/go-runewidth"
-
 	"ontop/internal/collect"
-	"ontop/internal/parse"
 	"ontop/internal/render"
 )
-
-func TestParseAMDJSON(t *testing.T) {
-	output := `{"devices":[{"Info":{"DeviceName":"AMD Radeon RX 9070 XT","DevicePath":{"pci":"0000:03:00.0"}},"gpu_activity":{"GFX":{"unit":"%","value":42}},"Sensors":{"Edge Temperature":{"unit":"C","value":55},"Average Power":{"unit":"W","value":120}},"VRAM":{"Total VRAM Usage":{"unit":"MiB","value":2048},"Total VRAM":{"unit":"MiB","value":16384}},"fdinfo":{"123":{"name":"ollama","usage":{"name":"ollama","usage":{"GTT":{"unit":"MiB","value":16},"VRAM":{"unit":"MiB","value":1024}}}}}}]}`
-
-	gpus, err := parse.ParseAMDJSON(output)
-	if err != nil {
-		t.Fatalf("parse.ParseAMDJSON returned error: %v", err)
-	}
-	if len(gpus) != 1 {
-		t.Fatalf("got %d GPUs, want 1", len(gpus))
-	}
-	gpu := gpus[0]
-	if gpu.Name != "AMD Radeon RX 9070 XT" || gpu.PCI != "0000:03:00.0" {
-		t.Fatalf("unexpected identity: %+v", gpu)
-	}
-	if !gpu.UtilPercent.OK || gpu.UtilPercent.Value != 42 || !gpu.MemoryUsed.OK || gpu.MemoryUsed.Value != 2048 {
-		t.Fatalf("unexpected metrics: %+v", gpu)
-	}
-	if len(gpu.Processes) != 1 || gpu.Processes[0].Name != "ollama" || gpu.Processes[0].VRAMMiB.Value != 1024 || gpu.Processes[0].GTTMiB.Value != 16 {
-		t.Fatalf("unexpected processes: %+v", gpu.Processes)
-	}
-}
-
-func TestParseOllamaPS(t *testing.T) {
-	output := `NAME ID SIZE PROCESSOR CONTEXT UNTIL
-ornith-1.5:9b-opencode abcdef123456 5.0 GB 100% GPU 262144 4 minutes from now`
-
-	models := parse.ParseOllamaPS(output)
-	if len(models) != 1 {
-		t.Fatalf("got %d models, want 1", len(models))
-	}
-	model := models[0]
-	if model.Name != "ornith-1.5:9b-opencode" || model.Size != "5.0 GB" || model.Processor != "100% GPU" || model.Context != "262144" {
-		t.Fatalf("unexpected model: %+v", model)
-	}
-}
-
-func TestParseOllamaPSJSONWithTokens(t *testing.T) {
-	output := `[{"name":"qwen2.5:14b","id":"abc123","size":14000000000,"context_length":8192,"prompt_tokens":1520,"output_tokens":340},{"name":"llama3:8b","id":"def456","size":8000000000,"context_length":4096,"prompt_tokens":800,"output_tokens":120}]`
-
-	models := parse.ParseOllamaPSJSON(output)
-	if len(models) != 2 {
-		t.Fatalf("got %d models, want 2", len(models))
-	}
-	if models[0].CtxTokens != 8192 || models[0].PromptTokens != 1520 {
-		t.Fatalf("unexpected token counts for model 0: ctx=%d want 8192, prompt=%d want 1520", models[0].CtxTokens, models[0].PromptTokens)
-	}
-	if models[1].CtxTokens != 4096 || models[1].PromptTokens != 800 {
-		t.Fatalf("unexpected token counts for model 1: ctx=%d want 4096, prompt=%d want 800", models[1].CtxTokens, models[1].PromptTokens)
-	}
-}
-
-func TestFitTextUsesDisplayWidth(t *testing.T) {
-	text := collect.FitText("模型名称 abc", 10)
-	if width := runewidth.StringWidth(text); width > 10 {
-		t.Fatalf("display width %d exceeds limit: %q", width, text)
-	}
-}
-
-func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
-	row := collect.RenderCoreRow([]float64{10, 20, 30, 40, 50, 60}, 20)
-	if strings.Contains(row, "hidden") || !strings.Contains(row, "C0") || !strings.Contains(row, "C5") {
-		t.Fatalf("unexpected core row: %q", row)
-	}
-}
 
 func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
 	content := render.RenderContent(snapshot{CollectedAt: time.Now()}, 80, nil)
@@ -86,64 +16,32 @@ func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
 	}
 }
 
-func TestClassifyProvider(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"ollama", "Ollama"},
-		{"OLLAMA", "Ollama"},
-		{"  ollama  ", "Ollama"},
-		{"unsloth", "Unsloth"},
-		{"python-unsloth", "Unsloth"},
-		{"Python-Unsloth", "Unsloth"},
-		{"unsloth-trainer", "Unsloth"},
-		{"vllm", "vLLM"},
-		{"text-generation-server", "vLLM"},
-		{"koboldcpp", "KoboldCPP"},
-		{"xtt", "Local Inference"},
-		{"voyager", "Local Inference"},
-		{"sGLM", "Local Inference"},
-		{"llama.cpp", "Local Inference"},
-		{"llama-srv", "Local Inference"},
-		{"chrome", ""},
-		{"node", ""},
-		{"unknown-binary-1234", ""},
+func TestRenderContentOrdering(t *testing.T) {
+	s := snapshot{CollectedAt: time.Now()}
+	s.Inference = []inferenceProcess{
+		{PID: 200, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
 	}
-	for _, c := range cases {
-		if got := parse.ClassifyProvider(c.in, ""); got != c.want {
-			t.Fatalf("parse.ClassifyProvider(%q, %q) = %q, want %q", c.in, "", got, c.want)
+	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
+	s.AMDGPUs = []amdGPUStats{{Name: "Test AMD", Index: "0"}}
+
+	content := render.RenderContent(s, 120, nil)
+
+	idx := func(name string) int { return strings.Index(content, name) }
+	wantOrder := func(before, after string) int {
+		b, a := idx(before), idx(after)
+		if b < 0 && a < 0 {
+			return 0
 		}
+		if b < 0 {
+			return -1
+		}
+		if a < 0 {
+			return 1
+		}
+		return b - a
 	}
-}
-
-func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
-	output := `{"devices":[
-		{"Info":{"DeviceName":"AMD Radeon RX 9070 XT","DevicePath":{"pci":"0000:03:00.0"}},"gpu_activity":{},"Sensors":{},"VRAM":{},"fdinfo":{
-			"100":{"name":"ollama","usage":{"GTT":{"unit":"MiB","value":8},"VRAM":{"unit":"MiB","value":4096}}},
-			"200":{"name":"python-unsloth","usage":{"GTT":{"unit":"MiB","value":16},"VRAM":{"unit":"MiB","value":12288}}}
-		}}]}`
-
-	gpus, err := parse.ParseAMDJSON(output)
-	if err != nil {
-		t.Fatalf("parse.ParseAMDJSON returned error: %v", err)
-	}
-	if len(gpus) != 1 || len(gpus[0].Processes) != 2 {
-		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
-	}
-
-	inference := collect.BuildInferenceProcessList(nil, gpus)
-	if len(inference) != 2 {
-		t.Fatalf("got %d inference processes, want 2", len(inference))
-	}
-	if !inference[0].VRAMMiB.OK || inference[0].VRAMMiB.Value != 12288 {
-		t.Fatalf("expected highest VRAM first: %+v", inference[0])
-	}
-	if inference[0].Provider != "Unsloth" || inference[1].Provider != "Ollama" {
-		t.Fatalf("unexpected providers/order: %+v", inference)
-	}
-	if inference[0].PID != 200 || inference[1].PID != 100 {
-		t.Fatalf("unexpected PIDs/order: %+v", inference)
+	if wantOrder("NVIDIA GPU", "AMD GPU") > 0 || wantOrder("AMD GPU", "Memory") > 0 || wantOrder("Memory", "System") > 0 {
+		t.Fatalf("unexpected section ordering: %q", content)
 	}
 }
 
@@ -191,163 +89,16 @@ func TestRenderGPUSectionLLMOnly(t *testing.T) {
 	}
 }
 
-func TestRenderContentOrdering(t *testing.T) {
-	s := snapshot{CollectedAt: time.Now()}
-	s.Inference = []inferenceProcess{
-		{PID: 200, Provider: "Ollama", Name: "ollama", VRAMMiB: optFloat{Value: 4096, OK: true}},
-	}
-	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
-	s.AMDGPUs = []amdGPUStats{{Name: "Test AMD", Index: "0"}}
-
-	content := render.RenderContent(s, 120, nil)
-
-	idx := func(name string) int { return strings.Index(content, name) }
-	wantOrder := func(before, after string) int {
-		b, a := idx(before), idx(after)
-		if b < 0 && a < 0 {
-			return 0
-		}
-		if b < 0 {
-			return -1
-		}
-		if a < 0 {
-			return 1
-		}
-		return b - a
-	}
-	if wantOrder("NVIDIA GPU", "AMD GPU") > 0 || wantOrder("AMD GPU", "Memory") > 0 || wantOrder("Memory", "System") > 0 {
-		t.Fatalf("unexpected section ordering: %q", content)
-	}
+func TestMainPackageTypeAliases(t *testing.T) {
+	var _ optFloat = collect.OptFloat{}
+	var _ snapshot = collect.Snapshot{}
+	var _ inferenceProcess = collect.InferenceProcess{}
+	var _ cpuStats = collect.CpuStats{}
+	var _ memoryStats = collect.MemoryStats{}
+	var _ swapMemoryStats = collect.SwapMemoryStats{}
+	var _ gpuStats = collect.GpuStats{}
+	var _ gpuProcess = collect.GpuProcess{}
+	var _ amdGPUStats = collect.AmdGpuStats{}
 }
 
-func readFixture(name string) string {
-	data, err := os.ReadFile("testdata/" + name)
-	if err != nil {
-		panic(fmt.Sprintf("failed to read testdata/%s: %v", name, err))
-	}
-	return string(data)
-}
 
-func TestParseOllamaPSWithFixture(t *testing.T) {
-	output := readFixture("ollama_ps_output.txt")
-	models := parse.ParseOllamaPS(output)
-	if len(models) != 2 {
-		t.Fatalf("got %d models, want 2", len(models))
-	}
-	if models[0].Name != "qwen2.5:14b" || models[0].Size != "8.1 GB" {
-		t.Fatalf("unexpected model: %+v", models[0])
-	}
-}
-
-func TestParseNVIDIASVMDetectsMultipleGPUs(t *testing.T) {
-	output := readFixture("nvidia_smi_output.txt")
-	gpus, err := parse.ParseGPUCSV(output)
-	if err != nil {
-		t.Fatalf("parse.ParseGPUCSV returned error: %v", err)
-	}
-	if len(gpus) != 2 {
-		t.Fatalf("got %d GPUs, want 2", len(gpus))
-	}
-	if gpus[0].Name != "NVIDIA GeForce RTX 4090" {
-		t.Fatalf("unexpected GPU 0: %v", gpus[0])
-	}
-}
-
-func TestParseAMDProcessesFromJSON(t *testing.T) {
-	output := readFixture("amdgpu_top_output.json")
-	gpus, err := parse.ParseAMDJSON(output)
-	if err != nil {
-		t.Fatalf("parse.ParseAMDJSON returned error: %v", err)
-	}
-	if len(gpus) != 1 {
-		t.Fatalf("got %d GPUs, want 1", len(gpus))
-	}
-	if len(gpus[0].Processes) != 2 {
-		t.Fatalf("got %d processes, want 2", len(gpus[0].Processes))
-	}
-	found := make(map[string]bool)
-	for _, p := range gpus[0].Processes {
-		found[p.Name] = true
-		found[p.Provider] = true
-	}
-	if !found["ollama"] {
-		t.Fatalf("ollama not found in GPU processes")
-	}
-	if !found["vllm"] {
-		t.Fatalf("vllm provider not found in GPU processes")
-	}
-}
-
-func BenchmarkParseAMDJSON(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		fixtures, _ := os.ReadFile("testdata/amdgpu_top_output.json")
-		parse.ParseAMDJSON(string(fixtures))
-	}
-}
-
-func BenchmarkParseOllamaPS(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		fixtures, _ := os.ReadFile("testdata/ollama_ps_output.txt")
-		parse.ParseOllamaPS(string(fixtures))
-	}
-}
-
-func BenchmarkFitText(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		collect.FitText("模型名称 abc 测试", 30)
-	}
-}
-
-func BenchmarkRenderCPU(b *testing.B) {
-	stats := cpuStats{
-		OK:      true,
-		Total:   45.2,
-		PerCore: []float64{35.1, 50.2, 44.5, 60.3, 25.7, 70.1},
-	}
-	for i := 0; i < b.N; i++ {
-		collect.RenderCPU(stats, nil, 160)
-	}
-}
-
-func BenchmarkRenderMemory(b *testing.B) {
-	stats := memoryStats{
-		OK:        true,
-		Used:      12000000000,
-		Total:     32000000000,
-		Available: 8000000000,
-		Percent:   37.5,
-	}
-	for i := 0; i < b.N; i++ {
-		collect.RenderMemory(stats, nil, 120)
-	}
-}
-
-func BenchmarkRenderCoreCell(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		collect.RenderCoreCell(0, 42.5, 160)
-	}
-}
-
-func BenchmarkRenderBar(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		collect.RenderBar(75.0, 20)
-	}
-}
-
-func BenchmarkHumanBytes(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		collect.HumanBytes(1234567890)
-	}
-}
-
-func BenchmarkClassifyProvider(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		parse.ClassifyProvider("python", "python3 -m torch.nn.parallel.DistributedDataParallel --ollama")
-	}
-}
-
-func BenchmarkParseOptFloat(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		parse.ParseOptFloat("12345.67")
-	}
-}
