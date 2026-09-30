@@ -1,19 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math"
-	"net/http"
+
 	"os"
-	"os/exec"
-	"path/filepath"
-	"sort"
-	"strconv"
+
 	"strings"
 	"time"
 
@@ -21,14 +16,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/mem"
-	netio "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
 
 	"ontop/internal/collect"
-	"ontop/internal/parse"
 )
 
 const defaultInterval = time.Second
@@ -44,7 +33,6 @@ var prevNetIO map[string]netDeviceStats
 var CurrentTheme Theme = themes["dark"]
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 
 type tickMsg time.Time
 
@@ -193,12 +181,12 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		s := collectMetrics(ctx)
+		s := collect.CollectMetrics(ctx)
 
 		if *onceMode && len(s.GPUs) > 0 {
 			// Second collection to populate sparklines with real delta data.
 			<-time.After(500 * time.Millisecond)
-			s = collectMetrics(ctx)
+			s = collect.CollectMetrics(ctx)
 		}
 
 		switch *exportTarget {
@@ -276,7 +264,7 @@ func newModel(interval time.Duration, cfg config) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(collectMetricsCmd(), tickCmd(m.interval))
+	return tea.Batch(collect.CollectMetricsCmd(), collect.TickCmd(m.interval))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -295,7 +283,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.loading {
 				m.viewport.GotoTop()
 				m.loading = true
-				cmds = append(cmds, collectMetricsCmd())
+				cmds = append(cmds, collect.CollectMetricsCmd())
 			}
 		}
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
@@ -306,7 +294,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				enabled := !m.disabledSections["GPU"]
 				m.disabledSections["GPU"] = enabled
-				m.notification = fmt.Sprintf("GPU section %s", mapBoolString(enabled))
+				m.notification = fmt.Sprintf("GPU section %s", collect.MapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 's':
 				if m.disabledSections == nil {
@@ -314,7 +302,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				enabled := !m.disabledSections["System"]
 				m.disabledSections["System"] = enabled
-				m.notification = fmt.Sprintf("System section %s", mapBoolString(enabled))
+				m.notification = fmt.Sprintf("System section %s", collect.MapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'm':
 				if m.disabledSections == nil {
@@ -322,7 +310,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				enabled := !m.disabledSections["Memory"]
 				m.disabledSections["Memory"] = enabled
-				m.notification = fmt.Sprintf("Memory section %s", mapBoolString(enabled))
+				m.notification = fmt.Sprintf("Memory section %s", collect.MapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'u':
 				if m.disabledSections == nil {
@@ -330,7 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				enabled := !m.disabledSections["Unsloth"]
 				m.disabledSections["Unsloth"] = enabled
-				m.notification = fmt.Sprintf("Unsloth section %s", mapBoolString(enabled))
+				m.notification = fmt.Sprintf("Unsloth section %s", collect.MapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case 'o':
 				if m.disabledSections == nil {
@@ -338,7 +326,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				enabled := !m.disabledSections["Ollama"]
 				m.disabledSections["Ollama"] = enabled
-				m.notification = fmt.Sprintf("Ollama section %s", mapBoolString(enabled))
+				m.notification = fmt.Sprintf("Ollama section %s", collect.MapBoolString(enabled))
 				m.notificationEnd = time.Now().Add(1 * time.Second).UnixNano()
 			case '?', 'h':
 				m.showHelp = !m.showHelp
@@ -360,10 +348,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if time.Now().UnixNano() >= m.notificationEnd {
 			m.notification = ""
 		}
-		cmds = append(cmds, tickCmd(m.interval))
+		cmds = append(cmds, collect.TickCmd(m.interval))
 		if !m.loading {
 			m.loading = true
-			cmds = append(cmds, collectMetricsCmd())
+			cmds = append(cmds, collect.CollectMetricsCmd())
 		}
 	}
 
@@ -427,753 +415,6 @@ func (m *model) updateViewport() {
 	m.viewport.SetContent(renderContent(m.snapshot, m.viewport.Width, m.disabledSections))
 }
 
-func tickCmd(interval time.Duration) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
-
-func collectMetricsCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		defer cancel()
-
-		return metricsMsg{Snapshot: collectMetrics(ctx)}
-	}
-}
-
-func collectMetrics(ctx context.Context) snapshot {
-	started := time.Now()
-	s := snapshot{CollectedAt: started}
-
-	prevDisk := make(map[string]diskDeviceStats)
-	if prevDiskIO != nil {
-		prevDisk = make(map[string]diskDeviceStats, len(prevDiskIO))
-		for k, v := range prevDiskIO {
-			prevDisk[k] = v
-		}
-	}
-	prevNet := make(map[string]netDeviceStats)
-	if prevNetIO != nil {
-		prevNet = make(map[string]netDeviceStats, len(prevNetIO))
-		for k, v := range prevNetIO {
-			prevNet[k] = v
-		}
-	}
-
-	prevCollectedAt := prevSnapshot.CollectedAt
-	var elapsed float64
-	if !prevCollectedAt.IsZero() {
-		elapsed = s.CollectedAt.Sub(prevCollectedAt).Seconds()
-	}
-
-	s.CPU = collectCPU(ctx, &s.Warnings)
-	s.Memory = collectMemory(ctx, &s.Warnings)
-	s.Swap = collectSwap(ctx, &s.Warnings)
-	s.Thermal = collectThermal(ctx, &s.Warnings)
-	s.Disk = collectDisk(ctx, &s.Warnings)
-	s.Net = collectNet(ctx, &s.Warnings)
-	s.GPUs = collectNVIDIA(ctx, &s.Warnings, prevSnapshot.GPUs)
-	s.AMDGPUs = collectAMD(ctx, &s.Warnings, prevSnapshot.AMDGPUs)
-	s.GPUSparkline = mergeGPUSparkline(prevSnapshot.GPUSparkline, s.GPUs)
-
-	if elapsed > 0.5 {
-		for _, curr := range s.Disk.Devices {
-			if prev, ok := prevDisk[curr.Name]; ok {
-				dt := float64(curr.ReadBytes-prev.ReadBytes) / elapsed
-				wt := float64(curr.WriteBytes-prev.WriteBytes) / elapsed
-				s.Disk.Rates = append(s.Disk.Rates, diskDeviceRates{
-					Name:     curr.Name,
-					ReadBps:  math.Max(dt, 0),
-					WriteBps: math.Max(wt, 0),
-				})
-			}
-		}
-		for _, curr := range s.Net.Devices {
-			if prev, ok := prevNet[curr.Name]; ok {
-				st := float64(curr.BytesSent-prev.BytesSent) / elapsed
-				rt := float64(curr.BytesRecv-prev.BytesRecv) / elapsed
-				s.Net.Rates = append(s.Net.Rates, netDeviceRates{
-					Name:         curr.Name,
-					BytesSentBps: math.Max(st, 0),
-					BytesRecvBps: math.Max(rt, 0),
-				})
-			}
-		}
-	}
-
-	diskForPrev := make([]diskDeviceStats, len(s.Disk.Devices))
-	copy(diskForPrev, s.Disk.Devices)
-	netForPrev := make([]netDeviceStats, len(s.Net.Devices))
-	copy(netForPrev, s.Net.Devices)
-	prevDiskIO = make(map[string]diskDeviceStats)
-	for _, d := range diskForPrev {
-		prevDiskIO[d.Name] = d
-	}
-	prevNetIO = make(map[string]netDeviceStats)
-	for _, d := range netForPrev {
-		prevNetIO[d.Name] = d
-	}
-
-	var historyCPU []float64
-	if len(prevSnapshot.CPUHistory) > 0 {
-		historyCPU = make([]float64, len(prevSnapshot.CPUHistory))
-		copy(historyCPU, prevSnapshot.CPUHistory)
-	}
-	if s.CPU.OK && len(s.CPU.PerCore) > 0 {
-		total := s.CPU.Total
-		history := historyCPU
-		if len(history) == 0 {
-			history = append(history, 0)
-		}
-		history = append(history, total)
-		if len(history) > 30 {
-			history = history[1:]
-		}
-		s.CPUHistory = history
-	}
-
-	var historyRAM []float64
-	if len(prevSnapshot.RAMHistory) > 0 {
-		historyRAM = make([]float64, len(prevSnapshot.RAMHistory))
-		copy(historyRAM, prevSnapshot.RAMHistory)
-	}
-	if s.Memory.OK {
-		percent := s.Memory.Percent
-		history := historyRAM
-		if len(history) == 0 {
-			history = append(history, 0)
-		}
-		history = append(history, percent)
-		if len(history) > 30 {
-			history = history[1:]
-		}
-		s.RAMHistory = history
-	}
-
-	s.Inference = collectInference(ctx, s.GPUs, s.AMDGPUs, &s.Warnings)
-	s.OllamaProcesses = collectOllamaProcesses(ctx, &s.Warnings)
-	s.OllamaPS = collectOllamaPS(ctx)
-	s.UnslothStudio = collectUnslothStudio(ctx, &s.Warnings)
-	s.CollectionMillis = time.Since(started).Milliseconds()
-
-	prevSnapshot = s
-
-	return s
-}
-
-func collectCPU(ctx context.Context, warnings *[]string) cpuStats {
-	stats := cpuStats{}
-	total, err := cpu.PercentWithContext(ctx, 0, false)
-	if err != nil {
-		addWarning(warnings, "CPU metrics unavailable: "+cleanError(err.Error()))
-		return stats
-	}
-	if len(total) > 0 {
-		stats.Total = total[0]
-		stats.OK = true
-	}
-
-	perCore, err := cpu.PercentWithContext(ctx, 0, true)
-	if err != nil {
-		addWarning(warnings, "per-core CPU metrics unavailable: "+cleanError(err.Error()))
-		return stats
-	}
-	stats.PerCore = perCore
-
-	return stats
-}
-
-func collectMemory(ctx context.Context, warnings *[]string) memoryStats {
-	vm, err := mem.VirtualMemoryWithContext(ctx)
-	if err != nil {
-		addWarning(warnings, "RAM metrics unavailable: "+cleanError(err.Error()))
-		return memoryStats{}
-	}
-
-	return memoryStats{
-		OK:        true,
-		Used:      vm.Used,
-		Total:     vm.Total,
-		Available: vm.Available,
-		Percent:   vm.UsedPercent,
-	}
-}
-
-func collectSwap(ctx context.Context, warnings *[]string) swapMemoryStats {
-	vm, err := mem.SwapMemoryWithContext(ctx)
-	if err != nil {
-		addWarning(warnings, "swap metrics unavailable: "+cleanError(err.Error()))
-		return swapMemoryStats{}
-	}
-
-	return swapMemoryStats{
-		OK:    true,
-		Used:  vm.Used,
-		Total: vm.Total,
-	}
-}
-
-func collectThermal(ctx context.Context, warnings *[]string) thermalStats {
-	stats := thermalStats{}
-	thermalPath := "/sys/class/thermal"
-
-	dir, err := os.Open(thermalPath)
-	if err != nil {
-		addWarning(warnings, "thermal sensors unavailable")
-		return stats
-	}
-	defer dir.Close()
-
-	entries, err := dir.ReadDir(-1)
-	if err != nil || len(entries) == 0 {
-		addWarning(warnings, "thermal sensors unavailable")
-		return stats
-	}
-
-	stats.OK = true
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		zonePath := thermalPath + "/" + entry.Name()
-		typeFile := zonePath + "/type"
-		tempFile := zonePath + "/temp"
-
-		typeData, err := os.ReadFile(typeFile)
-		if err != nil {
-			continue
-		}
-		zoneType := strings.TrimSpace(string(typeData))
-		if zoneType == "" {
-			continue
-		}
-
-		tempData, err := os.ReadFile(tempFile)
-		if err != nil {
-			continue
-		}
-		var tempMilli float64
-		_, err = fmt.Sscanf(string(tempData), "%f", &tempMilli)
-		if err != nil {
-			continue
-		}
-
-		tempCelsius := tempMilli / 1000.0
-		stats.Zone = append(stats.Zone, thermalZone{
-			Index:       len(stats.Zone),
-			Type:        fmt.Sprintf("%s (%s)", zoneType, entry.Name()),
-			Temperature: optFloat{Value: tempCelsius, OK: true},
-		})
-		if tempCelsius > stats.Total.Value {
-			stats.Total = optFloat{Value: tempCelsius, OK: true}
-		}
-	}
-
-	if len(stats.Zone) == 0 {
-		stats.OK = false
-	}
-	return stats
-}
-
-func collectDisk(ctx context.Context, warnings *[]string) diskStats {
-	stats := diskStats{}
-	devices, err := disk.IOCountersWithContext(ctx)
-	if err != nil {
-		addWarning(warnings, "disk I/O metrics unavailable: "+cleanError(err.Error()))
-		return stats
-	}
-	stats.OK = true
-	for name, dev := range devices {
-		stats.Devices = append(stats.Devices, diskDeviceStats{
-			Name:       name,
-			ReadBytes:  dev.ReadBytes,
-			WriteBytes: dev.WriteBytes,
-			ReadIOss:   dev.ReadCount,
-			WriteIOSS:  dev.WriteCount,
-		})
-	}
-	if len(stats.Devices) == 0 {
-		stats.OK = false
-	}
-	return stats
-}
-
-func collectNet(ctx context.Context, warnings *[]string) netStats {
-	stats := netStats{}
-	devices, err := netio.IOCountersWithContext(ctx, false)
-	if err != nil {
-		addWarning(warnings, "network I/O metrics unavailable: "+cleanError(err.Error()))
-		return stats
-	}
-	stats.OK = true
-	for _, dev := range devices {
-		stats.Devices = append(stats.Devices, netDeviceStats{
-			Name:        dev.Name,
-			BytesSent:   dev.BytesSent,
-			BytesRecv:   dev.BytesRecv,
-			PacketsSent: dev.PacketsSent,
-			PacketsRecv: dev.PacketsRecv,
-		})
-	}
-	return stats
-}
-
-func collectNVIDIA(ctx context.Context, warnings *[]string, prevGpus []gpuStats) []gpuStats {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		return nil
-	}
-
-	fields := "index,name,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed"
-	stdout, stderr, err := runCommand(ctx, "nvidia-smi", "--query-gpu="+fields, "--format=csv,noheader,nounits")
-	if err != nil {
-		addWarning(warnings, "nvidia-smi GPU query failed: "+cleanCommandError(err, stderr))
-		return nil
-	}
-
-	gpus, err := parse.ParseGPUCSV(stdout)
-	if err != nil {
-		addWarning(warnings, "could not parse nvidia-smi GPU metrics: "+cleanError(err.Error()))
-		return nil
-	}
-
-	processes, processWarning := collectGPUProcesses(ctx)
-	if processWarning != "" {
-		addWarning(warnings, processWarning)
-	}
-
-	byUUID := make(map[string]int, len(gpus))
-	for i := range gpus {
-		byUUID[gpus[i].UUID] = i
-	}
-	for _, p := range processes {
-		if idx, ok := byUUID[p.GPUUUID]; ok {
-			gpus[idx].Processes = append(gpus[idx].Processes, p)
-		}
-	}
-
-	addGPUUtilDelta(prevGpus, gpus)
-	addVRAMDeltas(prevGpus, gpus)
-
-	return gpus
-}
-
-func collectAMD(ctx context.Context, warnings *[]string, prevGpus []amdGPUStats) []amdGPUStats {
-	if _, err := exec.LookPath("amdgpu_top"); err != nil {
-		stats := collectAMDFromSysfs(warnings)
-		if len(stats) > 0 {
-			addAMDUtilDelta(nil, stats)
-		}
-		return stats
-	}
-
-	stdout, stderr, err := runCommand(ctx, "amdgpu_top", "--json", "--no-pc", "-n", "1", "-s", "100")
-	if err != nil {
-		addWarning(warnings, "amdgpu_top query failed: "+cleanCommandError(err, stderr))
-		stats := collectAMDFromSysfs(warnings)
-		if len(stats) > 0 {
-			addAMDUtilDelta(prevGpus, stats)
-		}
-		return stats
-	}
-
-	gpus, err := parse.ParseAMDJSON(stdout)
-	if err != nil {
-		addWarning(warnings, "could not parse amdgpu_top metrics: "+cleanError(err.Error()))
-		stats := collectAMDFromSysfs(warnings)
-		if len(stats) > 0 {
-			addAMDUtilDelta(prevGpus, stats)
-		}
-		return stats
-	}
-	addAMDUtilDelta(prevGpus, gpus)
-	return gpus
-}
-
-// buildInferenceProcessList correlates GPU processes from already-collected
-// NVIDIA and AMD data into a unified sorted inference process list.
-func buildInferenceProcessList(nvidia []gpuStats, amd []amdGPUStats) []inferenceProcess {
-	inference := make([]inferenceProcess, 0)
-
-	for _, gpu := range nvidia {
-		for _, p := range gpu.Processes {
-			if !p.UsedMemoryMB.OK {
-				continue
-			}
-			name := p.Name
-			if name == "" {
-				name = "unknown"
-			}
-			inference = append(inference, inferenceProcess{
-				PID:      p.PID,
-				Provider: p.Provider,
-				Name:     name,
-				VRAMMiB:  p.UsedMemoryMB,
-				GTTMiB:   optFloat{},
-			})
-		}
-	}
-
-	for _, gpu := range amd {
-		for _, p := range gpu.Processes {
-			name := p.Name
-			if name == "" {
-				name = "unknown"
-			}
-			inference = append(inference, inferenceProcess{
-				PID:      p.PID,
-				Provider: p.Provider,
-				Name:     name,
-				VRAMMiB:  p.VRAMMiB,
-				GTTMiB:   p.GTTMiB,
-			})
-		}
-	}
-
-	sort.SliceStable(inference, func(i, j int) bool {
-		if inference[i].VRAMMiB.OK != inference[j].VRAMMiB.OK {
-			return inference[i].VRAMMiB.OK
-		}
-		return inference[i].VRAMMiB.Value > inference[j].VRAMMiB.Value
-	})
-
-	return inference
-}
-
-func collectInference(ctx context.Context, nvidia []gpuStats, amd []amdGPUStats, warnings *[]string) []inferenceProcess {
-	return buildInferenceProcessList(nvidia, amd)
-}
-
-func parseGPUCSV(output string) ([]gpuStats, error) {
-	records, err := parse.ReadCSV(output)
-	if err != nil {
-		return nil, err
-	}
-
-	gpus := make([]gpuStats, 0, len(records))
-	for _, row := range records {
-		if len(row) < 10 {
-			return nil, fmt.Errorf("expected 10 GPU fields, got %d", len(row))
-		}
-
-		gpus = append(gpus, gpuStats{
-			Index:       strings.TrimSpace(row[0]),
-			Name:        strings.TrimSpace(row[1]),
-			UUID:        strings.TrimSpace(row[2]),
-			UtilPercent: parse.ParseOptFloat(row[3]),
-			MemoryUsed:  parse.ParseOptFloat(row[4]),
-			MemoryTotal: parse.ParseOptFloat(row[5]),
-			Temperature: parse.ParseOptFloat(row[6]),
-			PowerDraw:   parse.ParseOptFloat(row[7]),
-			PowerLimit:  parse.ParseOptFloat(row[8]),
-			FanPercent:  parse.ParseOptFloat(row[9]),
-		})
-	}
-
-	return gpus, nil
-}
-
-
-// processCmdline reads the full command line for a PID from /proc.
-func processCmdline(pid int32) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return ""
-	}
-	s := strings.ReplaceAll(string(data), "\x00", " ")
-	return strings.TrimSpace(s)
-}
-
-// processContainerName resolves a PID to its container name if it's a container.
-func processContainerName(pid int32) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, "docker") || strings.Contains(line, "podman") {
-			for _, part := range strings.Split(line, " ") {
-				for _, prefix := range []string{"docker/", "podman/"} {
-					if strings.HasPrefix(part, prefix) {
-						return part[len(prefix):]
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func collectGPUProcesses(ctx context.Context) ([]gpuProcess, string) {
-	fields := "gpu_uuid,pid,process_name,used_memory"
-	stdout, stderr, err := runCommand(ctx, "nvidia-smi", "--query-compute-apps="+fields, "--format=csv,noheader,nounits")
-	if err != nil {
-		text := strings.ToLower(stdout + " " + stderr + " " + err.Error())
-		if strings.Contains(text, "no running") || strings.Contains(text, "not supported") {
-			return nil, ""
-		}
-		return nil, "nvidia-smi process query failed: " + cleanCommandError(err, stderr)
-	}
-
-	records, err := parse.ReadCSV(stdout)
-	if err != nil {
-		return nil, "could not parse nvidia-smi process metrics: " + cleanError(err.Error())
-	}
-
-	processes := make([]gpuProcess, 0, len(records))
-	for _, row := range records {
-		if len(row) < 4 {
-			continue
-		}
-
-		pid64, err := strconv.ParseInt(strings.TrimSpace(row[1]), 10, 32)
-		if err != nil {
-			continue
-		}
-
-		processName := strings.TrimSpace(row[2])
-		cmdline := processCmdline(int32(pid64))
-		containerName := processContainerName(int32(pid64))
-		displayName := processName
-		if containerName != "" {
-			displayName = containerName
-		}
-		processes = append(processes, gpuProcess{
-			GPUUUID:      strings.TrimSpace(row[0]),
-			PID:          int32(pid64),
-			Provider:     parse.ClassifyProvider(processName, cmdline),
-			Name:         displayName,
-			UsedMemoryMB: parse.ParseOptFloat(row[3]),
-		})
-	}
-
-	sort.Slice(processes, func(i, j int) bool {
-		if processes[i].GPUUUID == processes[j].GPUUUID {
-			return processes[i].PID < processes[j].PID
-		}
-		return processes[i].GPUUUID < processes[j].GPUUUID
-	})
-
-	return processes, ""
-}
-
-func collectOllamaProcesses(ctx context.Context, warnings *[]string) []ollamaProcess {
-	procs, err := process.ProcessesWithContext(ctx)
-	if err != nil {
-		addWarning(warnings, "process list unavailable: "+cleanError(err.Error()))
-		return nil
-	}
-
-	now := time.Now()
-	ollamaProcs := make([]ollamaProcess, 0)
-	for _, p := range procs {
-		name, _ := p.NameWithContext(ctx)
-		cmdline, _ := p.CmdlineWithContext(ctx)
-		identity := strings.ToLower(name + " " + cmdline)
-		if !strings.Contains(identity, "ollama") {
-			continue
-		}
-
-		item := ollamaProcess{
-			PID:     p.Pid,
-			Name:    strings.TrimSpace(name),
-			Command: strings.TrimSpace(cmdline),
-		}
-
-		if item.Command == "" {
-			item.Command = item.Name
-		}
-
-		if cpuPct, err := p.CPUPercentWithContext(ctx); err == nil {
-			item.CPUPercent = cpuPct
-		}
-		if memPct, err := p.MemoryPercentWithContext(ctx); err == nil {
-			item.MemoryPercent = float64(memPct)
-		}
-		if mi, err := p.MemoryInfoWithContext(ctx); err == nil && mi != nil {
-			item.RSS = mi.RSS
-		}
-		if createMS, err := p.CreateTimeWithContext(ctx); err == nil && createMS > 0 {
-			started := time.UnixMilli(createMS)
-			if started.Before(now) {
-				item.Runtime = now.Sub(started)
-				item.RuntimeOK = true
-			}
-		}
-
-		ollamaProcs = append(ollamaProcs, item)
-	}
-
-	sort.Slice(ollamaProcs, func(i, j int) bool {
-		if ollamaProcs[i].CPUPercent == ollamaProcs[j].CPUPercent {
-			return ollamaProcs[i].PID < ollamaProcs[j].PID
-		}
-		return ollamaProcs[i].CPUPercent > ollamaProcs[j].CPUPercent
-	})
-
-	return ollamaProcs
-}
-
-func collectOllamaPS(ctx context.Context) commandOutput {
-	if _, err := exec.LookPath("ollama"); err != nil {
-		return commandOutput{Missing: true, Error: "ollama command not found"}
-	}
-
-	stdout, stderr, err := runCommand(ctx, "ollama", "ps", "--json")
-	if err == nil {
-		output := strings.TrimSpace(stdout)
-		models := parse.ParseOllamaPSJSON(output)
-		return commandOutput{Output: output, Models: models}
-	}
-
-	textStdout, _, textErr := runCommand(ctx, "ollama", "ps")
-	if textErr != nil {
-		return commandOutput{Error: cleanCommandError(err, stderr)}
-	}
-
-	output := strings.TrimSpace(textStdout)
-	return commandOutput{Output: output, Models: parse.ParseOllamaPS(output)}
-}
-
-
-func collectUnslothStudio(ctx context.Context, warnings *[]string) unslothStudioStats {
-	base := discoverStudioBase(ctx)
-	if base == "" {
-		return unslothStudioStats{}
-	}
-
-	stats := unslothStudioStats{Connected: true}
-
-	// If no token, we can still show connected status.
-	if studioToken == "" {
-		return stats
-	}
-
-	// Inference status.
-	statusURL := base + "/api/inference/status"
-	statusResp, err := studioHTTPGet(ctx, statusURL, studioToken)
-	if err != nil {
-		stats.Error = "inference status unavailable: " + err.Error()
-	} else {
-		defer statusResp.Body.Close()
-		if statusResp.StatusCode == http.StatusOK {
-			stats.ParseInferenceStatus(statusResp.Body)
-		} else {
-			stats.Error = fmt.Sprintf("inference status %d", statusResp.StatusCode)
-		}
-	}
-
-	// Training status.
-	trainURL := base + "/api/train/status"
-	trainResp, err := studioHTTPGet(ctx, trainURL, studioToken)
-	if err != nil {
-		// Non-fatal; training may simply not be running.
-	} else {
-		defer trainResp.Body.Close()
-		if trainResp.StatusCode == http.StatusOK {
-			stats.ParseTrainStatus(trainResp.Body)
-		}
-	}
-
-	// Load progress.
-	loadURL := base + "/api/inference/load-progress"
-	loadResp, err := studioHTTPGet(ctx, loadURL, studioToken)
-	if err != nil {
-		// Non-fatal.
-	} else {
-		defer loadResp.Body.Close()
-		if loadResp.StatusCode == http.StatusOK {
-			stats.ParseLoadProgress(loadResp.Body)
-		}
-	}
-
-	return stats
-}
-
-func discoverStudioBase(ctx context.Context) string {
-	if configured := strings.TrimRight(strings.TrimSpace(os.Getenv("UNSLOTH_STUDIO_URL")), "/"); configured != "" {
-		probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancel()
-		if studioHealthOK(probeCtx, configured) {
-			return configured
-		}
-		return ""
-	}
-
-	if detected := detectUnslothProcesses(); detected != "" {
-		return detected
-	}
-
-	ports := []int{studioPort}
-	if studioPort == 8888 || studioPort == -1 {
-		ports = []int{8888, 8000, 3000, 8080}
-	}
-	for _, port := range ports {
-		base := fmt.Sprintf("http://127.0.0.1:%d", port)
-		if studioHealthOK(ctx, base) {
-			return base
-		}
-	}
-	return ""
-}
-
-func detectUnslothProcesses() string {
-	procs, err := process.Processes()
-	if err != nil {
-		return ""
-	}
-	for _, p := range procs {
-		name, _ := p.Name()
-		if strings.Contains(strings.ToLower(name), "unsloth") {
-			cmdline, _ := p.Cmdline()
-			for _, arg := range strings.Fields(cmdline) {
-				if strings.HasPrefix(arg, "--port=") {
-					port := strings.TrimPrefix(arg, "--port=")
-					if portNum, err := strconv.Atoi(port); err == nil {
-						return fmt.Sprintf("http://localhost:%d", portNum)
-					}
-				}
-			}
-			return "http://localhost:8888"
-		}
-	}
-	return ""
-}
-
-func studioHealthOK(ctx context.Context, base string) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancel()
-	resp, err := studioHTTPGet(probeCtx, base+"/api/health", "")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
-}
-
-func studioHTTPGet(ctx context.Context, url string, token string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	return http.DefaultClient.Do(req)
-}
-
-func runCommand(ctx context.Context, name string, args ...string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-
 func renderHeader(s snapshot, interval time.Duration, loading bool, flashActive bool, currentFrame string, width int) string {
 	updated := "waiting for first sample"
 	if !s.CollectedAt.IsZero() {
@@ -1209,7 +450,6 @@ func renderHeader(s snapshot, interval time.Duration, loading bool, flashActive 
 		BorderForeground(borderCol)
 	return style.Width(maxInt(20, width-2)).Render(header)
 }
-
 func renderFooter(width int, disabledSections map[string]bool) string {
 	var toggles []string
 	sections := []struct {
@@ -1237,14 +477,12 @@ func renderFooter(width int, disabledSections map[string]bool) string {
 	text := toggleText + "      " + keysText
 	return footerStyle.Width(maxInt(20, width-2)).Render(collect.FitText(text, maxInt(10, width-4)))
 }
-
 func isEnabled(disabledSections map[string]bool, name string) bool {
 	if disabledSections == nil {
 		return true
 	}
 	return !disabledSections[name]
 }
-
 func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 	lines := []string{
 		"q / Ctrl+C   quit",
@@ -1292,86 +530,13 @@ func renderHelpOverlay(width int, disabledSections map[string]bool) string {
 
 	return card1 + "\n\n" + card2 + "\n\n" + collect.RenderCard("Section State", strings.Join(stateLines, "\n"), width)
 }
-
 func renderContent(s snapshot, width int, disabledSections map[string]bool) string {
 	return collect.RenderContentSections(s, width, disabledSections)
 }
-
-
-func collectAMDFromSysfs(warnings *[]string) []amdGPUStats {
-	stats := make([]amdGPUStats, 0)
-
-	dirEntries, err := os.ReadDir("/sys/class/drm")
-	if err != nil {
-		addWarning(warnings, "AMD GPU sysfs unavailable: "+cleanError(err.Error()))
-		return stats
-	}
-
-	for _, d := range dirEntries {
-		if !d.IsDir() || !strings.HasPrefix(d.Name(), "card") {
-			continue
-		}
-
-		cardDir := "/sys/class/drm/" + d.Name()
-		deviceDir := cardDir + "/device"
-
-		if _, err := os.Stat(deviceDir); os.IsNotExist(err) {
-			continue
-		}
-
-		gpu := amdGPUStats{
-			Index: strings.TrimPrefix(d.Name(), "card"),
-			Name:  "AMD GPU",
-		}
-
-		if pci, err := os.Readlink(deviceDir); err == nil {
-			gpu.PCI = filepath.Base(pci)
-		}
-
-		hwmonDir := deviceDir + "/hwmon"
-		hwmonEntries, err := os.ReadDir(hwmonDir)
-		if err == nil {
-			for _, e := range hwmonEntries {
-				if !strings.HasPrefix(e.Name(), "hwmon") {
-					continue
-				}
-				tempFile := hwmonDir + "/" + e.Name() + "/temp1_input"
-				if temp, err := os.ReadFile(tempFile); err == nil {
-					if val, err := strconv.ParseFloat(strings.TrimSpace(string(temp)), 64); err == nil {
-						if val > 0 {
-							gpu.Temperature = optFloat{Value: val / 1000.0, OK: true}
-						}
-					}
-				}
-			}
-		}
-
-		stats = append(stats, gpu)
-	}
-
-	return stats
-}
-
-func mapBoolString(b bool) string {
-	if b {
-		return "enabled"
-	}
-	return "disabled"
-}
-
-func addWarning(warnings *[]string, message string) {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return
-	}
-	*warnings = append(*warnings, message)
-}
-
 func cleanError(message string) string {
 	message = strings.Join(strings.Fields(message), " ")
 	return message
 }
-
 func cleanCommandError(err error, stderr string) string {
 	message := strings.TrimSpace(stderr)
 	if message == "" && err != nil {
@@ -1379,95 +544,18 @@ func cleanCommandError(err error, stderr string) string {
 	}
 	return cleanError(message)
 }
-
 func trimDuration(d time.Duration) string {
 	if d%time.Second == 0 {
 		return d.String()
 	}
 	return d.Round(time.Millisecond).String()
 }
-
-func addGPUUtilDelta(prev []gpuStats, new []gpuStats) {
-	for i := range new {
-		if i < len(prev) && prev[i].UtilPercent.OK && new[i].UtilPercent.OK {
-			delta := new[i].UtilPercent.Value - prev[i].UtilPercent.Value
-			new[i].UtilDelta = delta
-			if delta > 2 {
-				new[i].UtilTrend = "▲"
-			} else if delta < -2 {
-				new[i].UtilTrend = "▼"
-			} else {
-				new[i].UtilTrend = "-"
-			}
-		}
-	}
-}
-
-func addVRAMDeltas(prev []gpuStats, new []gpuStats) {
-	for i := range new {
-		if i < len(prev) && prev[i].MemoryUsed.OK && new[i].MemoryUsed.OK {
-			delta := new[i].MemoryUsed.Value - prev[i].MemoryUsed.Value
-			new[i].VRAMDelta = delta
-			if delta > 100 {
-				new[i].VRAMTrend = "▲"
-			} else if delta < -100 {
-				new[i].VRAMTrend = "▼"
-			} else {
-				new[i].VRAMTrend = "-"
-			}
-		}
-	}
-}
-
-func addAMDUtilDelta(prev []amdGPUStats, new []amdGPUStats) {
-	for i := range new {
-		if i < len(prev) && prev[i].UtilPercent.OK && new[i].UtilPercent.OK {
-			delta := new[i].UtilPercent.Value - prev[i].UtilPercent.Value
-			new[i].UtilDelta = delta
-			if delta > 2 {
-				new[i].UtilTrend = "▲"
-			} else if delta < -2 {
-				new[i].UtilTrend = "▼"
-			} else {
-				new[i].UtilTrend = "-"
-			}
-		}
-	}
-}
-
-func mergeGPUSparkline(prev map[string][]float64, new []gpuStats) map[string][]float64 {
-	result := make(map[string][]float64)
-
-	for k, v := range prev {
-		if len(v) > 0 {
-			result[k] = v
-		}
-	}
-
-	for _, gpu := range new {
-		if gpu.UtilPercent.OK {
-			history := result[gpu.Index]
-			if len(history) == 0 {
-				history = append(history, 0)
-			}
-			history = append(history, gpu.UtilPercent.Value)
-			if len(history) > 30 {
-				history = history[1:]
-			}
-			result[gpu.Index] = history
-		}
-	}
-
-	return result
-}
-
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
 }
-
 func minInt(a, b int) int {
 	if a < b {
 		return a

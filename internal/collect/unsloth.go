@@ -1,9 +1,147 @@
 package collect
 
 import (
+	"context"
 	"encoding/json"
+	stdfmt "fmt"
 	"io"
+	stdnethttp "net/http"
+	stdos "os"
+	stdstrconv "strconv"
+	stdstrings "strings"
+	"time"
+
+	"github.com/shirou/gopsutil/v3/process"
 )
+
+var studioPort = StudioPort
+var studioToken = StudioToken
+
+func CollectUnslothStudio(ctx context.Context, warnings *[]string) UnslothStudioStats {
+	base := DiscoverStudioBase(ctx)
+	if base == "" {
+		return UnslothStudioStats{}
+	}
+
+	stats := UnslothStudioStats{Connected: true}
+
+	if studioToken == "" {
+		return stats
+	}
+
+	statusURL := base + "/api/inference/status"
+	statusResp, err := studioHTTPGet(ctx, statusURL, studioToken)
+	if err != nil {
+		stats.Error = "inference status unavailable: " + err.Error()
+	} else {
+		defer statusResp.Body.Close()
+		if statusResp.StatusCode == stdnethttp.StatusOK {
+			stats.ParseInferenceStatus(statusResp.Body)
+		} else {
+			stats.Error = stdfmt.Sprintf("inference status %d", statusResp.StatusCode)
+		}
+	}
+
+	trainURL := base + "/api/train/status"
+	trainResp, err := studioHTTPGet(ctx, trainURL, studioToken)
+	if err != nil {
+		// Non-fatal; training may simply not be running.
+	} else {
+		defer trainResp.Body.Close()
+		if trainResp.StatusCode == stdnethttp.StatusOK {
+			stats.ParseTrainStatus(trainResp.Body)
+		}
+	}
+
+	loadURL := base + "/api/inference/load-progress"
+	loadResp, err := studioHTTPGet(ctx, loadURL, studioToken)
+	if err != nil {
+		// Non-fatal.
+	} else {
+		defer loadResp.Body.Close()
+		if loadResp.StatusCode == stdnethttp.StatusOK {
+			stats.ParseLoadProgress(loadResp.Body)
+		}
+	}
+
+	return stats
+}
+
+func DiscoverStudioBase(ctx context.Context) string {
+	configured := ""
+	if env := stdos.Getenv("UNSLOTH_STUDIO_URL"); env != "" {
+		configured = stdstrings.TrimRight(stdstrings.TrimSpace(env), "/")
+	}
+	if configured != "" {
+		probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		if StudioHealthOK(probeCtx, configured) {
+			return configured
+		}
+		return ""
+	}
+
+	if detected := DetectUnslothProcesses(); detected != "" {
+		return detected
+	}
+
+	ports := []int{studioPort}
+	if studioPort == 8888 || studioPort == -1 {
+		ports = []int{8888, 8000, 3000, 8080}
+	}
+	for _, port := range ports {
+		base := stdfmt.Sprintf("http://127.0.0.1:%d", port)
+		if StudioHealthOK(ctx, base) {
+			return base
+		}
+	}
+	return ""
+}
+
+func DetectUnslothProcesses() string {
+	procs, err := process.Processes()
+	if err != nil {
+		return ""
+	}
+	for _, p := range procs {
+		name, _ := p.Name()
+		if stdstrings.Contains(stdstrings.ToLower(name), "unsloth") {
+			cmdline, _ := p.Cmdline()
+			for _, arg := range stdstrings.Fields(cmdline) {
+				if stdstrings.HasPrefix(arg, "--port=") {
+					port := stdstrings.TrimPrefix(arg, "--port=")
+					if portNum, err := stdstrconv.Atoi(port); err == nil {
+						return stdfmt.Sprintf("http://localhost:%d", portNum)
+					}
+				}
+			}
+			return "http://localhost:8888"
+		}
+	}
+	return ""
+}
+
+func StudioHealthOK(ctx context.Context, base string) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	resp, err := studioHTTPGet(probeCtx, base+"/api/health", "")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == stdnethttp.StatusOK
+}
+
+func studioHTTPGet(ctx context.Context, url string, token string) (*stdnethttp.Response, error) {
+	req, err := stdnethttp.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return stdnethttp.DefaultClient.Do(req)
+}
 
 func (s *UnslothStudioStats) ParseInferenceStatus(body io.Reader) {
 	var raw map[string]json.RawMessage

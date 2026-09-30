@@ -69,7 +69,7 @@ func RenderCPU(stats CpuStats, history []float64, width int) string {
 	return strings.Join(lines, "\n")
 }
 
- func renderThermal(stats ThermalStats, width int) string {
+func renderThermal(stats ThermalStats, width int) string {
 	if !stats.Total.OK {
 		return ""
 	}

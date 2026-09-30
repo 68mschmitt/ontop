@@ -131,7 +131,7 @@ func TestCollectInferenceSortsByVRAMDesc(t *testing.T) {
 		t.Fatalf("unexpected GPUs/processes: %+v", gpus)
 	}
 
-	inference := buildInferenceProcessList(nil, gpus)
+	inference := collect.BuildInferenceProcessList(nil, gpus)
 	if len(inference) != 2 {
 		t.Fatalf("got %d inference processes, want 2", len(inference))
 	}
