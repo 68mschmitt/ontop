@@ -4,6 +4,8 @@ import (
 	"sort"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"ontop/internal/collect"
 )
 
 type Theme struct {
@@ -57,6 +59,7 @@ func applyTheme(t Theme) {
 	dangerColor = lipgloss.Color(t.Danger)
 	panelColor = lipgloss.Color(t.Panel)
 	textColor = lipgloss.Color(t.Text)
+	collect.ApplyStyling(accentColor, mutedColor, warnColor, dangerColor, panelColor, textColor)
 }
 
 func listThemes() []string {
