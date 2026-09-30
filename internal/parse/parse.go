@@ -11,6 +11,10 @@ import (
 	"ontop/internal/collect"
 )
 
+func init() {
+	collect.ParseAMDJSONFn = ParseAMDJSON
+}
+
 // ClassifyProvider maps a process name and optional cmdline to a specific
 // provider label. Returns "" for unrecognized names (rendered as "other").
 func ClassifyProvider(name string, cmdline string) string {
