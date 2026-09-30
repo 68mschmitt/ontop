@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"sort"
 	stdfmt "fmt"
 	stdos "os"
 	stdstrings "strings"
@@ -134,9 +135,16 @@ func CollectDisk(ctx context.Context, warnings *[]string) DiskStats {
 		return stats
 	}
 	stats.OK = true
-	for name, dev := range devices {
+	devList := make([]disk.IOCountersStat, 0, len(devices))
+	for _, dev := range devices {
+		devList = append(devList, dev)
+	}
+	sort.Slice(devList, func(i, j int) bool {
+		return devList[i].Name < devList[j].Name
+	})
+	for _, dev := range devList {
 		stats.Devices = append(stats.Devices, DiskDeviceStats{
-			Name:       name,
+			Name:       dev.Name,
 			ReadBytes:  dev.ReadBytes,
 			WriteBytes: dev.WriteBytes,
 			ReadIOss:   dev.ReadCount,
