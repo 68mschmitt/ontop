@@ -112,3 +112,55 @@ func FitText(text string, width int) string {
 	}
 	return runewidth.Truncate(text, width, "...")
 }
+
+func AccentColor() lipgloss.Color {
+	return accentColor
+}
+
+func MutedColor() lipgloss.Color {
+	return mutedColor
+}
+
+func WarnColor() lipgloss.Color {
+	return warnColor
+}
+
+func DangerColor() lipgloss.Color {
+	return dangerColor
+}
+
+func PanelColor() lipgloss.Color {
+	return panelColor
+}
+
+func TextColor() lipgloss.Color {
+	return textColor
+}
+
+func TitleStyle() lipgloss.Style {
+	return titleStyle
+}
+
+func MutedStyle() lipgloss.Style {
+	return mutedStyle
+}
+
+func ValueStyle() lipgloss.Style {
+	return valueStyle
+}
+
+func WarnStyle() lipgloss.Style {
+	return warnStyle
+}
+
+func FooterStyle() lipgloss.Style {
+	return footerStyle
+}
+
+func SectionTitleStyle() lipgloss.Style {
+	return sectionTitleStyle
+}
+
+func HeaderStyleTemplate() lipgloss.Style {
+	return headerStyleTemplate
+}

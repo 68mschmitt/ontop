@@ -11,6 +11,7 @@ import (
 
 	"ontop/internal/collect"
 	"ontop/internal/parse"
+	"ontop/internal/render"
 )
 
 func TestParseAMDJSON(t *testing.T) {
@@ -79,7 +80,7 @@ func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
 }
 
 func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
-	content := renderContent(snapshot{CollectedAt: time.Now()}, 80, nil)
+	content := render.RenderContent(snapshot{CollectedAt: time.Now()}, 80, nil)
 	if strings.Contains(content, "NVIDIA GPU") || strings.Contains(content, "Unsloth Studio") || strings.Contains(content, "Ollama Processes") {
 		t.Fatalf("optional service card rendered without metrics: %q", content)
 	}
@@ -198,7 +199,7 @@ func TestRenderContentOrdering(t *testing.T) {
 	s.GPUs = []gpuStats{{Name: "Test GPU", Index: "0"}}
 	s.AMDGPUs = []amdGPUStats{{Name: "Test AMD", Index: "0"}}
 
-	content := renderContent(s, 120, nil)
+	content := render.RenderContent(s, 120, nil)
 
 	idx := func(name string) int { return strings.Index(content, name) }
 	wantOrder := func(before, after string) int {
