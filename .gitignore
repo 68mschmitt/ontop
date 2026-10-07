@@ -23,3 +23,6 @@ go.work.sum
 Thumbs.db
 *.swp
 *.swo
+
+# Agent scratch space
+.agent-work/
