@@ -89,9 +89,7 @@ func main() {
 		}
 	}
 
-	// Support env var override for Unsloth Studio URL before import.
-	_ = os.Getenv("UNSLOTH_STUDIO_URL")
-
+	// UNSLOTH_STUDIO_URL is read by the collector during discovery.
 	envInterval := os.Getenv("ONTOP_INTERVAL")
 	if envInterval != "" {
 		if parsed, err := time.ParseDuration(envInterval); err == nil {
@@ -103,6 +101,11 @@ func main() {
 	if studioToken == "" {
 		studioToken = os.Getenv("UNSLOTH_STUDIO_TOKEN")
 	}
+
+	collect.Configure(collect.Config{
+		StudioPort:  studioPort,
+		StudioToken: studioToken,
+	})
 
 	if *interval <= 0 {
 		fmt.Fprintln(os.Stderr, "interval must be greater than zero")

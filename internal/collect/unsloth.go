@@ -14,9 +14,6 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-var studioPort = StudioPort
-var studioToken = StudioToken
-
 func CollectUnslothStudio(ctx context.Context, warnings *[]string) UnslothStudioStats {
 	base := DiscoverStudioBase(ctx)
 	if base == "" {
@@ -25,12 +22,8 @@ func CollectUnslothStudio(ctx context.Context, warnings *[]string) UnslothStudio
 
 	stats := UnslothStudioStats{Connected: true}
 
-	if studioToken == "" {
-		return stats
-	}
-
 	statusURL := base + "/api/inference/status"
-	statusResp, err := studioHTTPGet(ctx, statusURL, studioToken)
+	statusResp, err := studioHTTPGet(ctx, statusURL, config.StudioToken)
 	if err != nil {
 		stats.Error = "inference status unavailable: " + err.Error()
 	} else {
@@ -43,7 +36,7 @@ func CollectUnslothStudio(ctx context.Context, warnings *[]string) UnslothStudio
 	}
 
 	trainURL := base + "/api/train/status"
-	trainResp, err := studioHTTPGet(ctx, trainURL, studioToken)
+	trainResp, err := studioHTTPGet(ctx, trainURL, config.StudioToken)
 	if err != nil {
 		// Non-fatal; training may simply not be running.
 	} else {
@@ -54,7 +47,7 @@ func CollectUnslothStudio(ctx context.Context, warnings *[]string) UnslothStudio
 	}
 
 	loadURL := base + "/api/inference/load-progress"
-	loadResp, err := studioHTTPGet(ctx, loadURL, studioToken)
+	loadResp, err := studioHTTPGet(ctx, loadURL, config.StudioToken)
 	if err != nil {
 		// Non-fatal.
 	} else {
@@ -85,8 +78,8 @@ func DiscoverStudioBase(ctx context.Context) string {
 		return detected
 	}
 
-	ports := []int{studioPort}
-	if studioPort == 8888 || studioPort == -1 {
+	ports := []int{config.StudioPort}
+	if config.StudioPort == 8888 || config.StudioPort == -1 {
 		ports = []int{8888, 8000, 3000, 8080}
 	}
 	for _, port := range ports {

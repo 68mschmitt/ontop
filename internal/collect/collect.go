@@ -10,8 +10,22 @@ var prevSnapshot Snapshot
 var prevDiskIO map[string]DiskDeviceStats
 var prevNetIO map[string]NetDeviceStats
 
-var StudioPort = 8888
-var StudioToken = ""
+// Config holds runtime options supplied by the CLI before collection starts.
+type Config struct {
+	StudioPort  int
+	StudioToken string
+}
+
+var config = Config{StudioPort: 8888}
+
+// Configure sets runtime options. It must be called before the first
+// CollectMetrics call and is not safe to mutate concurrently.
+func Configure(c Config) {
+	if c.StudioPort == 0 {
+		c.StudioPort = 8888
+	}
+	config = c
+}
 
 func CollectMetrics(ctx context.Context) Snapshot {
 	started := time.Now()
