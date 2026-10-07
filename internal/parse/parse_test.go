@@ -170,5 +170,3 @@ func BenchmarkParseOptFloat(b *testing.B) {
 		ParseOptFloat("12345.67")
 	}
 }
-
-

@@ -21,8 +21,6 @@ func TestRenderCoreRowWrapsInsteadOfHiding(t *testing.T) {
 	}
 }
 
-
-
 func TestRenderGPUSectionGrouping(t *testing.T) {
 	gpus := []GpuStats{
 		{

@@ -2,9 +2,9 @@ package collect
 
 import (
 	"context"
-	"sort"
 	stdfmt "fmt"
 	stdos "os"
+	"sort"
 	stdstrings "strings"
 
 	"github.com/shirou/gopsutil/v3/cpu"

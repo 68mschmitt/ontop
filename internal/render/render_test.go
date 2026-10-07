@@ -21,7 +21,7 @@ func TestRenderContentOrdering(t *testing.T) {
 		Inference: []collect.InferenceProcess{
 			{PID: 200, Provider: "Ollama", Name: "ollama", VRAMMiB: collect.OptFloat{Value: 4096, OK: true}},
 		},
-		GPUs: []collect.GpuStats{{Name: "Test GPU", Index: "0"}},
+		GPUs:    []collect.GpuStats{{Name: "Test GPU", Index: "0"}},
 		AMDGPUs: []collect.AmdGpuStats{{Name: "Test AMD", Index: "0"}},
 	}
 

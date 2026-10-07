@@ -100,5 +100,3 @@ func TestMainPackageTypeAliases(t *testing.T) {
 	var _ gpuProcess = collect.GpuProcess{}
 	var _ amdGPUStats = collect.AmdGpuStats{}
 }
-
-

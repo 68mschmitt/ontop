@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"ontop/internal/collect"
 	"github.com/charmbracelet/lipgloss"
+	"ontop/internal/collect"
 )
 
 func RenderHeader(s collect.Snapshot, interval time.Duration, loading bool, flashActive bool, currentFrame string, width int) string {
