@@ -1,14 +1,15 @@
-package parse
+package collect
 
 import (
 	"os"
 	"testing"
 )
 
-func readFixture(name string) string {
+func readFixture(t *testing.T, name string) string {
+	t.Helper()
 	data, err := os.ReadFile("../../testdata/" + name)
 	if err != nil {
-		panic(err)
+		t.Fatalf("read fixture %s: %v", name, err)
 	}
 	return string(data)
 }
@@ -16,9 +17,9 @@ func readFixture(name string) string {
 func TestParseAMDJSON(t *testing.T) {
 	output := `{"devices":[{"Info":{"DeviceName":"AMD Radeon RX 9070 XT","DevicePath":{"pci":"0000:03:00.0"}},"gpu_activity":{"GFX":{"unit":"%","value":42}},"Sensors":{"Edge Temperature":{"unit":"C","value":55},"Average Power":{"unit":"W","value":120}},"VRAM":{"Total VRAM Usage":{"unit":"MiB","value":2048},"Total VRAM":{"unit":"MiB","value":16384}},"fdinfo":{"123":{"name":"ollama","usage":{"name":"ollama","usage":{"GTT":{"unit":"MiB","value":16},"VRAM":{"unit":"MiB","value":1024}}}}}}]}`
 
-	gpus, err := ParseAMDJSON(output)
+	gpus, err := parseAMDJSON(output)
 	if err != nil {
-		t.Fatalf("ParseAMDJSON returned error: %v", err)
+		t.Fatalf("parseAMDJSON returned error: %v", err)
 	}
 	if len(gpus) != 1 {
 		t.Fatalf("got %d GPUs, want 1", len(gpus))
@@ -39,7 +40,7 @@ func TestParseOllamaPS(t *testing.T) {
 	output := `NAME ID SIZE PROCESSOR CONTEXT UNTIL
 ornith-1.5:9b-opencode abcdef123456 5.0 GB 100% GPU 262144 4 minutes from now`
 
-	models := ParseOllamaPS(output)
+	models := parseOllamaPS(output)
 	if len(models) != 1 {
 		t.Fatalf("got %d models, want 1", len(models))
 	}
@@ -52,7 +53,7 @@ ornith-1.5:9b-opencode abcdef123456 5.0 GB 100% GPU 262144 4 minutes from now`
 func TestParseOllamaPSJSONWithTokens(t *testing.T) {
 	output := `[{"name":"qwen2.5:14b","id":"abc123","size":14000000000,"context_length":8192,"prompt_tokens":1520,"output_tokens":340},{"name":"llama3:8b","id":"def456","size":8000000000,"context_length":4096,"prompt_tokens":800,"output_tokens":120}]`
 
-	models := ParseOllamaPSJSON(output)
+	models := parseOllamaPSJSON(output)
 	if len(models) != 2 {
 		t.Fatalf("got %d models, want 2", len(models))
 	}
@@ -65,8 +66,8 @@ func TestParseOllamaPSJSONWithTokens(t *testing.T) {
 }
 
 func TestParseOllamaPSWithFixture(t *testing.T) {
-	output := readFixture("ollama_ps_output.txt")
-	models := ParseOllamaPS(output)
+	output := readFixture(t, "ollama_ps_output.txt")
+	models := parseOllamaPS(output)
 	if len(models) != 2 {
 		t.Fatalf("got %d models, want 2", len(models))
 	}
@@ -76,10 +77,10 @@ func TestParseOllamaPSWithFixture(t *testing.T) {
 }
 
 func TestParseNVIDIASVMDetectsMultipleGPUs(t *testing.T) {
-	output := readFixture("nvidia_smi_output.txt")
-	gpus, err := ParseGPUCSV(output)
+	output := readFixture(t, "nvidia_smi_output.txt")
+	gpus, err := parseGPUCSVFields(output)
 	if err != nil {
-		t.Fatalf("ParseGPUCSV returned error: %v", err)
+		t.Fatalf("parseGPUCSVFields returned error: %v", err)
 	}
 	if len(gpus) != 2 {
 		t.Fatalf("got %d GPUs, want 2", len(gpus))
@@ -90,10 +91,10 @@ func TestParseNVIDIASVMDetectsMultipleGPUs(t *testing.T) {
 }
 
 func TestParseAMDProcessesFromJSON(t *testing.T) {
-	output := readFixture("amdgpu_top_output.json")
-	gpus, err := ParseAMDJSON(output)
+	output := readFixture(t, "amdgpu_top_output.json")
+	gpus, err := parseAMDJSON(output)
 	if err != nil {
-		t.Fatalf("ParseAMDJSON returned error: %v", err)
+		t.Fatalf("parseAMDJSON returned error: %v", err)
 	}
 	if len(gpus) != 1 {
 		t.Fatalf("got %d GPUs, want 1", len(gpus))
@@ -139,34 +140,40 @@ func TestClassifyProvider(t *testing.T) {
 		{"unknown-binary-1234", ""},
 	}
 	for _, c := range cases {
-		if got := ClassifyProvider(c.in, ""); got != c.want {
-			t.Fatalf("ClassifyProvider(%q, %q) = %q, want %q", c.in, "", got, c.want)
+		if got := classifyProvider(c.in, ""); got != c.want {
+			t.Fatalf("classifyProvider(%q, %q) = %q, want %q", c.in, "", got, c.want)
 		}
 	}
 }
 
 func BenchmarkParseAMDJSON(b *testing.B) {
+	fixture, err := os.ReadFile("../../testdata/amdgpu_top_output.json")
+	if err != nil {
+		b.Fatalf("read fixture: %v", err)
+	}
 	for i := 0; i < b.N; i++ {
-		fixtures, _ := os.ReadFile("testdata/amdgpu_top_output.json")
-		ParseAMDJSON(string(fixtures))
+		_, _ = parseAMDJSON(string(fixture))
 	}
 }
 
 func BenchmarkParseOllamaPS(b *testing.B) {
+	fixture, err := os.ReadFile("../../testdata/ollama_ps_output.txt")
+	if err != nil {
+		b.Fatalf("read fixture: %v", err)
+	}
 	for i := 0; i < b.N; i++ {
-		fixtures, _ := os.ReadFile("testdata/ollama_ps_output.txt")
-		ParseOllamaPS(string(fixtures))
+		parseOllamaPS(string(fixture))
 	}
 }
 
 func BenchmarkClassifyProvider(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ClassifyProvider("python", "python3 -m torch.nn.parallel.DistributedDataParallel --ollama")
+		classifyProvider("python", "python3 -m torch.nn.parallel.DistributedDataParallel --ollama")
 	}
 }
 
 func BenchmarkParseOptFloat(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ParseOptFloat("12345.67")
+		parseOptFloat("12345.67")
 	}
 }

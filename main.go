@@ -16,9 +16,6 @@ import (
 	"ontop/internal/collect"
 	"ontop/internal/render"
 	"ontop/internal/ui"
-
-	// Ensure parse package init() runs to register AMD parser callback.
-	_ "ontop/internal/parse"
 )
 
 const defaultInterval = time.Second

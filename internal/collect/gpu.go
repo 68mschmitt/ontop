@@ -9,9 +9,6 @@ import (
 	stdstrings "strings"
 )
 
-// ParseAMDJSONFn is set by the parse package's init() to avoid import cycles.
-var ParseAMDJSONFn func(string) ([]AmdGpuStats, error)
-
 func parseCSV(output string) ([][]string, error) {
 	output = stdstrings.TrimSpace(output)
 	if output == "" {
@@ -86,24 +83,19 @@ func CollectAMD(ctx context.Context, warnings *[]string, prevGpus []AmdGpuStats)
 	}
 
 	// Parse the amdgpu_top JSON output.
-	if ParseAMDJSONFn != nil {
-		gpus, err := ParseAMDJSONFn(stdout)
-		if err != nil {
-			AddWarning(warnings, "amdgpu_top JSON parse failed: "+err.Error())
-			return CollectAMDFromSysfs(warnings)
+	gpus, err := parseAMDJSON(stdout)
+	if err != nil {
+		AddWarning(warnings, "amdgpu_top JSON parse failed: "+err.Error())
+		stats := CollectAMDFromSysfs(warnings)
+		if len(stats) > 0 {
+			AddAMDUtilDelta(prevGpus, stats)
 		}
-		if len(gpus) > 0 {
-			AddAMDUtilDelta(prevGpus, gpus)
-		}
-		return gpus
+		return stats
 	}
-
-	// Fallback if parser isn't registered yet.
-	stats := CollectAMDFromSysfs(warnings)
-	if len(stats) > 0 {
-		AddAMDUtilDelta(prevGpus, stats)
+	if len(gpus) > 0 {
+		AddAMDUtilDelta(prevGpus, gpus)
 	}
-	return stats
+	return gpus
 }
 
 func BuildInferenceProcessList(nvidia []GpuStats, amd []AmdGpuStats) []InferenceProcess {
