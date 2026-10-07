@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,11 +24,6 @@ const version = "dev"
 var studioPort = 8888
 var studioToken = ""
 
-var prevSnapshot snapshot
-var prevDiskIO map[string]diskDeviceStats
-var prevNetIO map[string]netDeviceStats
-var CurrentTheme Theme = themes["dark"]
-
 var (
 	accentColor = lipgloss.Color("#7DFFB3")
 	mutedColor  = lipgloss.Color("#88909C")
@@ -40,7 +34,7 @@ var (
 )
 
 func applyStyling() {
-	collect.ApplyMainStyles(accentColor, mutedColor, warnColor, dangerColor, panelColor, textColor)
+	collect.ApplyStyling(accentColor, mutedColor, warnColor, dangerColor, panelColor, textColor)
 }
 
 func init() {
@@ -72,7 +66,6 @@ func main() {
 	if *themeFlag != "" {
 		if t, ok := themes[*themeFlag]; ok {
 			applyTheme(t)
-			CurrentTheme = t
 		} else {
 			fmt.Fprintf(os.Stderr, "unknown theme: %s (available: %v)\n", *themeFlag, listThemes())
 			os.Exit(1)
@@ -82,7 +75,6 @@ func main() {
 	if envTheme := os.Getenv("ONTOP_THEME"); envTheme != "" {
 		if t, ok := themes[envTheme]; ok {
 			applyTheme(t)
-			CurrentTheme = t
 		}
 	}
 
@@ -130,12 +122,7 @@ func main() {
 			}
 			fmt.Println(string(bytes))
 		case "csv":
-			writeCSV(s)
-			if *onceMode || *exportTarget == "" {
-				if *onceMode && *exportTarget != "" {
-					return
-				}
-			}
+			collect.WriteCSV(s)
 		default:
 			if len(*exportTarget) > 0 && *exportTarget != "stdout" {
 				f, err := os.Create(*exportTarget)
@@ -160,32 +147,10 @@ func main() {
 		RenderHelpOverlay: render.RenderHelpOverlay,
 	}
 
-	model := ui.NewModel(*interval, ui.UIConfig{}, renderFuncs)
+	model := ui.NewModel(*interval, renderFuncs)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to run dashboard: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func writeCSV(s snapshot) {
-	w := csv.NewWriter(os.Stdout)
-	defer w.Flush()
-
-	w.Write([]string{"timestamp", "cpu_total", "cpu_per_core", "ram_used", "ram_total", "ram_percent", "swap_used", "swap_total"})
-
-	cores := make([]string, len(s.CPU.PerCore))
-	for i, v := range s.CPU.PerCore {
-		cores[i] = fmt.Sprintf("%.1f%%", v)
-	}
-	w.Write([]string{
-		s.CollectedAt.Format(time.RFC3339),
-		fmt.Sprintf("%.1f", s.CPU.Total),
-		strings.Join(cores, ";"),
-		fmt.Sprintf("%d", s.Memory.Used),
-		fmt.Sprintf("%d", s.Memory.Total),
-		fmt.Sprintf("%.1f", s.Memory.Percent),
-		fmt.Sprintf("%d", s.Swap.Used),
-		fmt.Sprintf("%d", s.Swap.Total),
-	})
 }

@@ -170,13 +170,6 @@ func CleanCommandError(err error, stderr string) string {
 	return CleanError(message)
 }
 
-func TrimDuration(d time.Duration) string {
-	if d%time.Second == 0 {
-		return d.String()
-	}
-	return d.Round(time.Millisecond).String()
-}
-
 func RunCommand(ctx context.Context, name string, args ...string) (string, string, error) {
 	cmd := stdexec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
@@ -220,13 +213,13 @@ func WriteCSV(s Snapshot) {
 	w := csv.NewWriter(stdos.Stdout)
 	defer w.Flush()
 
-	w.Write([]string{"timestamp", "cpu_total", "cpu_per_core", "ram_used", "ram_total", "ram_percent", "swap_used", "swap_total"})
+	_ = w.Write([]string{"timestamp", "cpu_total", "cpu_per_core", "ram_used", "ram_total", "ram_percent", "swap_used", "swap_total"})
 
 	cores := make([]string, len(s.CPU.PerCore))
 	for i, v := range s.CPU.PerCore {
 		cores[i] = stdfmt.Sprintf("%.1f%%", v)
 	}
-	w.Write([]string{
+	_ = w.Write([]string{
 		s.CollectedAt.Format(time.RFC3339),
 		stdfmt.Sprintf("%.1f", s.CPU.Total),
 		stdstrings.Join(cores, ";"),

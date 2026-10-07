@@ -49,10 +49,7 @@ var themes = map[string]Theme{
 	},
 }
 
-var currentTheme = themes["dark"]
-
 func applyTheme(t Theme) {
-	currentTheme = t
 	accentColor = lipgloss.Color(t.Accent)
 	mutedColor = lipgloss.Color(t.Muted)
 	warnColor = lipgloss.Color(t.Warn)

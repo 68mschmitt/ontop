@@ -9,13 +9,12 @@ import (
 
 // Style variables - initialized from main.
 var (
-	accentColor   lipgloss.Color
-	mutedColor    lipgloss.Color
-	warnColor     lipgloss.Color
-	dangerColor   lipgloss.Color
-	panelColor    lipgloss.Color
-	textColor     lipgloss.Color
-	StylesApplied bool
+	accentColor lipgloss.Color
+	mutedColor  lipgloss.Color
+	warnColor   lipgloss.Color
+	dangerColor lipgloss.Color
+	panelColor  lipgloss.Color
+	textColor   lipgloss.Color
 
 	titleStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	mutedStyle          = lipgloss.NewStyle().Foreground(mutedColor)
@@ -59,11 +58,6 @@ func ApplyStyling(accent, muted, warn, danger, panel, text lipgloss.Color) {
 	sevWarnColorStyle = lipgloss.NewStyle().Foreground(warnColor)
 	sevDangerColorStyle = lipgloss.NewStyle().Foreground(dangerColor)
 	headerStyleTemplate = lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(panelColor)
-	StylesApplied = true
-}
-
-func ApplyMainStyles(accent, muted, warn, danger, panel, text lipgloss.Color) {
-	ApplyStyling(accent, muted, warn, danger, panel, text)
 }
 
 func maxInt(a, b int) int {

@@ -18,14 +18,6 @@ type RenderFuncs struct {
 	RenderHelpOverlay func(width int, disabledSections map[string]bool) string
 }
 
-type UIConfig struct {
-	Interval     time.Duration
-	GPUFilter    int
-	Theme        string
-	NoSparklines bool
-	ShowNotices  bool
-}
-
 type Model struct {
 	interval         time.Duration
 	render           RenderFuncs
@@ -37,7 +29,6 @@ type Model struct {
 	snapshot         collect.Snapshot
 	showHelp         bool
 	disabledSections map[string]bool
-	cfg              UIConfig
 	spinnerIndex     int
 	flashActive      bool
 	flashEnd         int64
@@ -47,7 +38,7 @@ type Model struct {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-func NewModel(interval time.Duration, cfg UIConfig, rf RenderFuncs) *Model {
+func NewModel(interval time.Duration, rf RenderFuncs) *Model {
 	vp := viewport.New(100, 24)
 	vp.Style = lipgloss.NewStyle()
 
@@ -56,7 +47,6 @@ func NewModel(interval time.Duration, cfg UIConfig, rf RenderFuncs) *Model {
 		loading:          true,
 		viewport:         vp,
 		disabledSections: make(map[string]bool),
-		cfg:              cfg,
 		render:           rf,
 	}
 }
