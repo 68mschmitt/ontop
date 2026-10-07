@@ -18,7 +18,9 @@ import (
 )
 
 const defaultInterval = time.Second
-const version = "dev"
+
+// version is overridden at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 // Global CLI config for collectors that need it.
 var studioPort = 8888

@@ -1,9 +1,11 @@
 .PHONY: build test test-race vet fmt fmt-check bench run clean
 
 BINARY := ontop
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION)
 
 build:
-	go build -o $(BINARY) .
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
 test:
 	go test ./...

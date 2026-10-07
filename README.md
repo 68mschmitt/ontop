@@ -52,6 +52,12 @@ No NVIDIA GPU? No Ollama daemon? `nvidia-smi` went out for milk and never came b
 go build -o ontop .
 ```
 
+Or, with the included `Makefile`:
+
+```sh
+make build
+```
+
 Congratulations. You now have a binary named `ontop`, which is both a program and a pun delivery mechanism.
 
 ## Run
@@ -69,6 +75,46 @@ Need a different refresh interval because one second is either too slow, too fas
 
 Supported interval examples include `500ms`, `1s`, `2s`, and whatever duration makes your terminal feel alive without becoming a strobe light for statistics.
 
+## Configuration
+
+### Flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-interval` | `1s` | Refresh interval (`500ms`, `1s`, `2s`, ...). |
+| `-theme` | `dark` | Color theme: `dark`, `midnight`, or `monokai`. |
+| `-list-themes` | | Print the available themes and exit. |
+| `-once` | `false` | Collect a single snapshot and exit. |
+| `-export` | | Output target: `stdout`, `json`, `csv`, or a file path. |
+| `-unsloth-port` | `8888` | Unsloth Studio API port. |
+| `-unsloth-token` | | Unsloth Studio bearer token. |
+| `-version` | | Print the version and exit. |
+
+### Environment variables
+
+| Variable | Description |
+| --- | --- |
+| `ONTOP_INTERVAL` | Refresh interval; takes precedence over `-interval` when set. |
+| `ONTOP_THEME` | Theme name; takes precedence over `-theme` when set. |
+| `UNSLOTH_STUDIO_URL` | Explicit Unsloth Studio base URL, probed before port discovery. |
+| `UNSLOTH_STUDIO_TOKEN` | Unsloth Studio bearer token, used when `-unsloth-token` is not set. |
+
+### Themes
+
+```sh
+./ontop -list-themes
+./ontop -theme=midnight
+```
+
+### Non-interactive output
+
+```sh
+./ontop -once                      # one text snapshot to stdout
+./ontop -once -export=json         # one snapshot as JSON
+./ontop -once -export=csv          # CPU, RAM, and swap as CSV
+./ontop -export=dashboard.txt      # render once and write to a file
+```
+
 ## Controls
 
 | Key | Action |
@@ -78,6 +124,12 @@ Supported interval examples include `500ms`, `1s`, `2s`, and whatever duration m
 | `r` | Refresh immediately, because patience is a kernel parameter you did not set |
 | `up` / `down` | Scroll like a responsible adult |
 | `pgup` / `pgdn` | Scroll like you mean it |
+| `s` | Toggle the System (CPU) section |
+| `g` | Toggle the GPU sections (NVIDIA and AMD) |
+| `m` | Toggle the Memory section |
+| `u` | Toggle the Unsloth section |
+| `o` | Toggle the Ollama sections |
+| `?` / `h` | Show or hide the help overlay |
 
 ## Metrics
 
@@ -86,7 +138,11 @@ Supported interval examples include `500ms`, `1s`, `2s`, and whatever duration m
 - NVIDIA GPU name, index, utilization, VRAM, temperature, power, fan speed, and active compute processes via `nvidia-smi --query-* --format=csv,noheader,nounits`.
 - AMD GPU name, PCI address, utilization, VRAM, temperature, power, and per-process VRAM/GTT via `amdgpu_top --json`.
 - RAM used, total, available, and percent via `gopsutil`.
-- Total CPU and per-core CPU usage via `gopsutil`.
+- Swap used and total.
+- Total CPU and per-core CPU usage via `gopsutil`, with a rolling utilization sparkline.
+- Thermal zones via `/sys/class/thermal`.
+- Disk read/write throughput and IOPS per device via `gopsutil`.
+- Network send/receive throughput per interface via `gopsutil`.
 - Ollama-related local processes with PID, command, CPU, RAM, RSS, and runtime via `gopsutil`.
 - Loaded Ollama models from `ollama ps`, including size, CPU/GPU placement, context, and expiry when available.
 - Unsloth Studio active model, context, loading, training, throughput, and parallel-session metrics when its API exposes them.
@@ -124,25 +180,19 @@ That last one is important. This is a dashboard, not a horoscope.
 
 ## Development
 
-Format the code:
+Common tasks are wrapped in the `Makefile`:
 
 ```sh
-gofmt -w .
+make fmt         # gofmt -w .
+make fmt-check   # fail if anything is unformatted
+make vet         # go vet ./...
+make test        # go test ./...
+make test-race   # go test -race -count=1 ./...
+make bench       # run the benchmarks
+make build       # go build -o ontop .
 ```
 
-Run tests:
-
-```sh
-go test ./...
-```
-
-Build it:
-
-```sh
-go build -o ontop .
-```
-
-Then run it, stare at the bars, nod thoughtfully, and say "interesting" even if everything is fine.
+Build it, run it, stare at the bars, nod thoughtfully, and say "interesting" even if everything is fine.
 
 Print the build version without starting the dashboard:
 
