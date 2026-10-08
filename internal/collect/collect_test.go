@@ -3,6 +3,7 @@ package collect
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -62,6 +63,28 @@ func TestRenderGPUSectionLLMOnly(t *testing.T) {
 	}
 	if strings.Contains(content, "Other Processes") {
 		t.Fatalf("did not expect Other Processes table when empty: %q", content)
+	}
+}
+
+func TestRenderSparklineProducesWholeRunes(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []float64
+		width  int
+		want   string
+	}{
+		{"empty", nil, 5, "....."},
+		{"scaled to percent", []float64{0, 25, 50, 75, 100}, 5, "▁▃▅▇█"},
+		{"top clamps to highest block", []float64{100, 100}, 2, "██"},
+	}
+	for _, c := range cases {
+		got := renderSparkline(c.values, c.width)
+		if !utf8.ValidString(got) {
+			t.Fatalf("%s: sparkline is not valid UTF-8: %q", c.name, got)
+		}
+		if got != c.want {
+			t.Fatalf("%s: renderSparkline = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

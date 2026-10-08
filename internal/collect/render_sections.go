@@ -714,13 +714,7 @@ func renderSparkline(values []float64, width int) string {
 		return strings.Repeat(".", width)
 	}
 
-	chars := "▁▂▃▄▅▆▇█"
-	maxVal := 0.0
-	for _, v := range values {
-		if v > maxVal {
-			maxVal = v
-		}
-	}
+	chars := []rune("▁▂▃▄▅▆▇█")
 
 	var result strings.Builder
 	step := float64(len(values)) / float64(width)
@@ -731,8 +725,8 @@ func renderSparkline(values []float64, width int) string {
 			idx = len(values) - 1
 		}
 		level := int(values[idx] / 100.0 * 8)
-		level = clampInt(level, 0, 7)
-		result.WriteByte(chars[level])
+		level = clampInt(level, 0, len(chars)-1)
+		result.WriteRune(chars[level])
 	}
 
 	return result.String()
