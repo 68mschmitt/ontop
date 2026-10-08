@@ -100,20 +100,6 @@ func RenderMemory(stats MemoryStats, history []float64, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderSwap(stats SwapMemoryStats, width int) string {
-	if !stats.OK {
-		return mutedStyle.Render("Swap metrics unavailable.")
-	}
-
-	innerWidth := maxInt(20, width-6)
-	used := fmt.Sprintf("%s / %s", HumanBytes(stats.Used), HumanBytes(stats.Total))
-	percent := 0.0
-	if stats.Total > 0 {
-		percent = float64(stats.Used) / float64(stats.Total) * 100
-	}
-	return metricLine("Swap", percent, fmt.Sprintf("%.1f%%  %s", percent, used), innerWidth)
-}
-
 func RenderMemoryCard(mem MemoryStats, swap SwapMemoryStats, history []float64, width int) string {
 	if !mem.OK {
 		return RenderCard("Memory", mutedStyle.Render("RAM metrics unavailable."), width)
@@ -719,46 +705,6 @@ func renderGPUProcessTable(processes []GpuProcess, width int) string {
 		}
 		line := fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), FitText(name, processWidth))
 		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderAMDProcessTable(processes []AmdGpuProcess, width int) string {
-	if width < 48 {
-		processWidth := maxInt(8, width-18)
-		lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %s", "PID", "VRAM", "PROCESS"))}
-		for _, p := range processes {
-			name := p.Name
-			if name == "" {
-				name = "unknown"
-			}
-			vramStr := optMemoryString(p.VRAMMiB)
-			var percent float64
-			if p.VRAMMiB.OK {
-				percent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
-			}
-			lines = append(lines, fmt.Sprintf("%-7d %-9s %s", p.PID, coloredValue(vramStr, percent), FitText(name, processWidth)))
-		}
-		return strings.Join(lines, "\n")
-	}
-
-	processWidth := maxInt(12, width-29)
-	lines := []string{labelStyle.Render(fmt.Sprintf("%-7s %-9s %-9s %s", "PID", "VRAM", "GTT", "PROCESS"))}
-	for _, p := range processes {
-		name := p.Name
-		if name == "" {
-			name = "unknown"
-		}
-		vramStr := optMemoryString(p.VRAMMiB)
-		gttStr := optMemoryString(p.GTTMiB)
-		var vramPercent, gttPercent float64
-		if p.VRAMMiB.OK {
-			vramPercent = inferVRAMPercent(p.VRAMMiB.Value, p.VRAMMiB.OK)
-		}
-		if p.GTTMiB.OK {
-			gttPercent = inferVRAMPercent(p.GTTMiB.Value, p.GTTMiB.OK)
-		}
-		lines = append(lines, fmt.Sprintf("%-7d %-9s %-9s %s", p.PID, coloredValue(vramStr, vramPercent), coloredValue(gttStr, gttPercent), FitText(name, processWidth)))
 	}
 	return strings.Join(lines, "\n")
 }
