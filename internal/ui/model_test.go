@@ -93,3 +93,28 @@ func TestMetricsMessageClearsLoading(t *testing.T) {
 		t.Fatal("metrics message should clear the loading state")
 	}
 }
+
+func TestCollectingIndicatorDebouncesFastCollections(t *testing.T) {
+	m := newTestModel()
+
+	if !m.collecting() {
+		t.Fatal("the initial load should report collecting")
+	}
+
+	m.snapshot = collect.Snapshot{CollectedAt: time.Now()}
+	m.loading = true
+	m.collectStartedAt = time.Now()
+	if m.collecting() {
+		t.Fatal("a just-started collection should not flicker the status")
+	}
+
+	m.collectStartedAt = time.Now().Add(-2 * busyIndicatorDelay)
+	if !m.collecting() {
+		t.Fatal("a slow collection should report collecting")
+	}
+
+	m.loading = false
+	if m.collecting() {
+		t.Fatal("an idle model should report idle")
+	}
+}

@@ -5,8 +5,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"ontop/internal/collect"
 )
+
+func TestStatusLabelKeepsFixedWidth(t *testing.T) {
+	idle := statusLabel(false, "")
+	collecting := statusLabel(true, "⠋")
+
+	if !strings.Contains(idle, "idle") {
+		t.Fatalf("idle label missing: %q", idle)
+	}
+	if !strings.Contains(collecting, "collecting") {
+		t.Fatalf("collecting label missing: %q", collecting)
+	}
+	if lipgloss.Width(idle) != lipgloss.Width(collecting) {
+		t.Fatalf("status label width changes: idle=%d collecting=%d", lipgloss.Width(idle), lipgloss.Width(collecting))
+	}
+	if lipgloss.Width(collecting) != statusWidth {
+		t.Fatalf("status label width = %d, want %d", lipgloss.Width(collecting), statusWidth)
+	}
+}
 
 func TestRenderContentOmitsUnavailableOptionalServices(t *testing.T) {
 	content := RenderContent(collect.Snapshot{CollectedAt: time.Now()}, 80, nil)

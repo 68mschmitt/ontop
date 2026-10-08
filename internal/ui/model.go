@@ -13,10 +13,16 @@ import (
 
 type RenderFuncs struct {
 	RenderContentFn   func(s collect.Snapshot, width int, disabledSections map[string]bool) string
-	RenderHeaderFn    func(s collect.Snapshot, interval time.Duration, loading bool, flash bool, frame string, width int) string
+	RenderHeaderFn    func(s collect.Snapshot, interval time.Duration, collecting bool, flash bool, frame string, width int) string
 	RenderFooterFn    func(width int, disabledSections map[string]bool) string
 	RenderHelpOverlay func(width int, disabledSections map[string]bool) string
 }
+
+// busyIndicatorDelay is how long a collection must be in flight before the
+// header switches from "idle" to "collecting". Collections normally finish in
+// a few milliseconds, so without this delay the status flickers once per
+// interval; only genuinely slow collections are worth announcing.
+const busyIndicatorDelay = 300 * time.Millisecond
 
 type Model struct {
 	interval         time.Duration
@@ -25,6 +31,7 @@ type Model struct {
 	height           int
 	ready            bool
 	loading          bool
+	collectStartedAt time.Time
 	viewport         viewport.Model
 	snapshot         collect.Snapshot
 	showHelp         bool
@@ -45,6 +52,7 @@ func NewModel(interval time.Duration, rf RenderFuncs) *Model {
 	return &Model{
 		interval:         interval,
 		loading:          true,
+		collectStartedAt: time.Now(),
 		viewport:         vp,
 		disabledSections: make(map[string]bool),
 		render:           rf,
@@ -71,6 +79,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.loading {
 				m.viewport.GotoTop()
 				m.loading = true
+				m.collectStartedAt = time.Now()
 				cmds = append(cmds, collect.CollectMetricsCmd())
 			}
 		}
@@ -124,6 +133,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, collect.TickCmd(m.interval))
 		if !m.loading {
 			m.loading = true
+			m.collectStartedAt = time.Now()
 			cmds = append(cmds, collect.CollectMetricsCmd())
 		}
 	}
@@ -156,10 +166,11 @@ func (m *Model) View() string {
 	}
 
 	frame := ""
-	if m.loading {
+	collecting := m.collecting()
+	if collecting {
 		frame = spinnerFrames[m.spinnerIndex]
 	}
-	header := m.render.RenderHeaderFn(m.snapshot, m.interval, m.loading, flash, frame, m.width)
+	header := m.render.RenderHeaderFn(m.snapshot, m.interval, collecting, flash, frame, m.width)
 	footer := m.render.RenderFooterFn(width, m.disabledSections)
 	vp := m.viewport
 	vp.Height = maxInt(1, m.height-lipgloss.Height(header)-lipgloss.Height(footer)-1)
@@ -176,6 +187,19 @@ func (m *Model) View() string {
 		content = content + "\n" + notif
 	}
 	return content
+}
+
+// collecting reports whether the header should announce an in-progress
+// collection. The initial load always counts; afterwards a collection must
+// outlast busyIndicatorDelay, otherwise the status would blink once per tick.
+func (m *Model) collecting() bool {
+	if !m.loading {
+		return false
+	}
+	if m.snapshot.CollectedAt.IsZero() {
+		return true
+	}
+	return time.Since(m.collectStartedAt) >= busyIndicatorDelay
 }
 
 func (m *Model) updateViewport() {

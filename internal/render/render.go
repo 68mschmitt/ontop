@@ -9,18 +9,24 @@ import (
 	"ontop/internal/collect"
 )
 
-func RenderHeader(s collect.Snapshot, interval time.Duration, loading bool, flashActive bool, currentFrame string, width int) string {
+// statusWidth keeps the "idle" and "collecting" labels the same display width
+// so the centered header does not shift when the status changes.
+const statusWidth = 12
+
+func statusLabel(collecting bool, frame string) string {
+	if collecting {
+		return fmt.Sprintf("%-*s", statusWidth, frame+" collecting")
+	}
+	return fmt.Sprintf("%-*s", statusWidth, "idle")
+}
+
+func RenderHeader(s collect.Snapshot, interval time.Duration, collecting bool, flashActive bool, currentFrame string, width int) string {
 	updated := "waiting for first sample"
 	if !s.CollectedAt.IsZero() {
 		updated = "updated " + s.CollectedAt.Format("15:04:05")
 	}
 
-	var statusStr string
-	if loading {
-		statusStr = lipgloss.NewStyle().Foreground(collect.AccentColor()).Render(currentFrame + " collecting")
-	} else {
-		statusStr = lipgloss.NewStyle().Foreground(collect.AccentColor()).Render("idle")
-	}
+	statusStr := lipgloss.NewStyle().Foreground(collect.AccentColor()).Render(statusLabel(collecting, currentFrame))
 
 	meta := fmt.Sprintf("%s | interval %s | %s", updated, trimDuration(interval), statusStr)
 	if s.CollectionMillis > 0 {
